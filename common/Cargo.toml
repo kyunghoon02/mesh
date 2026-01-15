@@ -1,0 +1,16 @@
+﻿[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 직렬화: JSON보다 훨씬 작고 빠른 이진 포맷
+postcard = { version = "1.0", features = ["use-heapless"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_repr = { version = "0.1", default-features = false }
+
+# 암호화: ChaCha20-Poly1305 (AEAD)
+chacha20poly1305 = { version = "0.10", default-features = false }
+
+# 에러 처리 및 타입
+heapless = { version = "0.8", features = ["serde"] }
