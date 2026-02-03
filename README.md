@@ -1,4 +1,5 @@
 ﻿# Mesh: Universal Hardware 2FA Infrastructure
+
 "No Mnemonics. No Compromise. Pure Hardware Security."
 
 Mesh는 기존 소프트웨어 지갑의 편의성을 유지하면서, 인터넷과 격리된 하드웨어 버튼 승인 없이는 자산 이동이 불가능하도록 설계된 고유 보안 아키텍처입니다. RPC 레벨에서 작동하는 보안 레이어를 통해 특정 dApp 종속 없이 범용적으로 적용되는 것을 목표로 합니다.
@@ -17,12 +18,12 @@ Mesh는 기존 소프트웨어 지갑의 편의성을 유지하면서, 인터넷
 
 ## Architecture Layers
 
-| Layer | Component | Hardware | Role |
-|------|-----------|----------|------|
-| L1 | Mesh Relayer | Local PC | Smart Firewall. RPC 프록시 및 패스키 복구 인터페이스 제공. |
-| L2 | Mesh Link | ESP32-C3 | Secure Bridge. 인터넷과 에어갭 장치를 잇는 암호화 중계기. |
-| L3 | Mesh Vault | LilyGO S3 | Root of Trust. 하드웨어 키 생성 및 물리적 버튼 승인. |
-| On-chain | Smart Wallet | EVM Chain | Final Judge. 하드웨어 서명 및 패스키 복구 로직 실행. |
+| Layer    | Component    | Hardware  | Role                                                       |
+| -------- | ------------ | --------- | ---------------------------------------------------------- |
+| L1       | Mesh Relayer | Server    | Smart Firewall. RPC 프록시 및 패스키 복구 인터페이스 제공. |
+| L2       | Mesh Link    | ESP32-C3  | Secure Bridge. 인터넷과 에어갭 장치를 잇는 암호화 중계기.  |
+| L3       | Mesh Vault   | LilyGO S3 | Root of Trust. 하드웨어 키 생성 및 물리적 버튼 승인.       |
+| On-chain | Smart Wallet | EVM Chain | Final Judge. 하드웨어 서명 및 패스키 복구 로직 실행.       |
 
 ---
 
@@ -50,8 +51,6 @@ mesh/
 ---
 
 ## Recovery Model: The Passkey Bridge
-
-Mesh는 하드웨어 분실이라는 SRE(Site Reliability Engineering) 관점의 장애를 Passkey(WebAuthn) 기술로 해결합니다.
 
 - **등록**: 지갑 생성 시 본인의 스마트폰 생체 인증을 복구 키로 등록.
 - **분실**: 하드웨어 분실 시 대시보드 접속.
