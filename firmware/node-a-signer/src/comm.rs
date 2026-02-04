@@ -39,10 +39,25 @@ impl<'a> CommManager<'a> {
 
     pub fn receive_packet(&self) -> Option<SecurePacket> {
         if let Some(data) = self.esp_now.receive() {
+            // 상호 화이트리스팅: 보낸 사람(src_addr)이 내가 신뢰하는 노드 B인지 확인
+            if data.info.src_addr != self.peer_address {
+                esp_println::println!(
+                    "알 수 없는 기기(MAC: {:?})로부터 패킷 감지 - 차단됨",
+                    data.info.src_addr
+                );
+                return None;
+            }
+
             // 실제 수신된 길이만 역직렬화 (패딩 쓰레기 방지)
             let actual_data = &data.data[..data.len as usize];
             let packet: Result<SecurePacket, _> = from_bytes(actual_data);
-            return packet.ok();
+            return match packet {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    esp_println::println!("패킷 역직렬화 실패");
+                    None
+                }
+            };
         }
         None
     }
