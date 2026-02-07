@@ -22,6 +22,18 @@ use postcard::{from_bytes, to_slice};
 use common::{error_codes, SerialCommand, SerialFrame, SerialResponse};
 use state::{PairingState, StateManager};
 
+const MAX_RETRIES: u8 = 3;
+const RETRY_INTERVAL_MS: u64 = 1000;
+const RESPONSE_TIMEOUT_MS: u64 = 5_000;
+
+struct PendingRequest {
+    sequence_id: u32,
+    packet: common::SecurePacket,
+    first_sent_ms: u64,
+    last_sent_ms: u64,
+    retries: u8,
+}
+
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take().expect("Failed to take peripherals");
@@ -63,6 +75,7 @@ fn main() -> ! {
 
     let mut rx_buf = [0u8; 250];
     let mut response_buf = [0u8; 250];
+    let mut pending: Option<PendingRequest> = None;
 
     loop {
         let current_time_ms = systimer.now() / 1000;
@@ -77,6 +90,7 @@ fn main() -> ! {
                         &mut comm,
                         &mut esp_now_opt,
                         current_time_ms,
+                        &mut pending,
                     );
 
                     // Serial로 응답 전송
@@ -93,11 +107,32 @@ fn main() -> ! {
         // ESP-NOW 응답 확인 (페어링된 경우)
         if let Some(ref mut comm_mgr) = comm {
             if let Some(packet) = comm_mgr.receive_packet() {
-                // ESP-NOW 응답을 Serial로 전달
-                let response = SerialResponse::success(0, &[])
-                    .unwrap_or_else(|| SerialResponse::error(0, error_codes::INVALID_COMMAND)); // TODO: sequence 추적
+                let seq = pending.as_ref().map(|p| p.sequence_id).unwrap_or(0);
+                let payload = to_slice(&packet, &mut response_buf).unwrap_or(&[]);
+                let response = SerialResponse::success(seq, payload)
+                    .unwrap_or_else(|| SerialResponse::error(seq, error_codes::INVALID_COMMAND));
                 if let Ok(serialized) = to_slice(&response, &mut response_buf) {
                     let _ = serial.write_frame(serialized);
+                }
+                pending = None;
+            }
+        }
+
+        // 재시도/타임아웃 처리
+        if let Some(p) = pending.as_mut() {
+            if current_time_ms.saturating_sub(p.first_sent_ms) >= RESPONSE_TIMEOUT_MS {
+                let response = SerialResponse::error(p.sequence_id, error_codes::TIMEOUT);
+                if let Ok(serialized) = to_slice(&response, &mut response_buf) {
+                    let _ = serial.write_frame(serialized);
+                }
+                pending = None;
+            } else if current_time_ms.saturating_sub(p.last_sent_ms) >= RETRY_INTERVAL_MS {
+                if p.retries < MAX_RETRIES {
+                    if let Some(ref mut comm_mgr) = comm {
+                        let _ = comm_mgr.send_packet(&p.packet);
+                        p.retries += 1;
+                        p.last_sent_ms = current_time_ms;
+                    }
                 }
             }
         }
@@ -111,6 +146,7 @@ fn process_command<'a>(
     comm: &mut Option<comm::CommManager<'a>>,
     esp_now: &mut Option<esp_wifi::esp_now::EspNow<'a>>,
     current_time_ms: u64,
+    pending: &mut Option<PendingRequest>,
 ) -> SerialResponse {
     match frame.command {
         SerialCommand::EnterPairing => {
@@ -165,13 +201,26 @@ fn process_command<'a>(
                 return SerialResponse::error(frame.sequence_id, error_codes::NOT_PAIRED);
             }
 
+            if pending.is_some() {
+                return SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE);
+            }
+
             // ESP-NOW를 통해 Node A로 전달
             if let Some(ref mut comm_mgr) = comm {
                 // payload에서 SecurePacket 역직렬화
                 if let Ok(packet) = from_bytes::<common::SecurePacket>(frame.payload_bytes()) {
                     match comm_mgr.send_packet(&packet) {
-                        Ok(_) => SerialResponse::success(frame.sequence_id, b"FORWARDED")
-                            .unwrap_or_else(|| SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND)),
+                        Ok(_) => {
+                            *pending = Some(PendingRequest {
+                                sequence_id: frame.sequence_id,
+                                packet,
+                                first_sent_ms: current_time_ms,
+                                last_sent_ms: current_time_ms,
+                                retries: 0,
+                            });
+                            SerialResponse::success(frame.sequence_id, b"FORWARDED")
+                                .unwrap_or_else(|| SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND))
+                        }
                         Err(_) => SerialResponse::error(frame.sequence_id, error_codes::ESPNOW_ERROR),
                     }
                 } else {
