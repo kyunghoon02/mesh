@@ -1,19 +1,19 @@
-[package]
+﻿[package]
 name = "node-a-signer"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+esp-hal = { version = "0.14.0", features = ["esp32s3", "unstable"] }
+esp-wifi = { version = "0.14.0", features = ["esp32s3", "wifi", "esp-now"] }
 esp-storage = { version = "0.8.1", features = ["esp32s3"] }
 embedded-storage = "0.3.1"
 esp-partition-table = "0.1.0"
-# 그래픽 및 디스플레이 드라이버
+# 그래픽/디스플레이 드라이버
 embedded-graphics = "0.8.1"
-st7789 = "0.7.0"                # LilyGO T-Display S3용 드라이버 (또는 mipidsi)
+st7789 = "0.7.0"                # LilyGO T-Display S3 드라이버 (또는 mipidsi)
 display-interface-spi = "0.5.0"
 # QR 코드 생성 (no_std 지원 버전)
 qrcodegen_no_heap = "1.8.1"
-# Wi-Fi 및 ESP-NOW 지원
-esp-wifi = { version = "0.1.0", features = ["esp32s3", "esp-now"] }
-# 직렬화를 위해 common에서 썼던 postcard와 동일 버전
+# 직렬화를 위해 common과 동일한 postcard 버전
 postcard = { version = "1.0", default-features = false }
