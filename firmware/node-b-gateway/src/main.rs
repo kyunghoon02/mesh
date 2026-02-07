@@ -81,8 +81,8 @@ fn main() -> ! {
         let current_time_ms = systimer.now() / 1000;
 
         // Serial 명령 처리
-        match serial.read_frame_blocking(&mut rx_buf) {
-            Ok(len) => {
+        match serial.poll_read_frame(&mut rx_buf) {
+            Ok(Some(len)) => {
                 if let Ok(frame) = from_bytes::<SerialFrame>(&rx_buf[..len]) {
                     let response = process_command(
                         &frame,
@@ -99,6 +99,7 @@ fn main() -> ! {
                     }
                 }
             }
+            Ok(None) => {}
             Err(_) => {
                 // Serial 에러 - 계속 수신 대기
             }
