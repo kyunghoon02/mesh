@@ -15,7 +15,27 @@ use tracing::{error, info};
 struct AppState {
     upstream: String,
     sca_address: String,
+    approval_mode: ApprovalMode,
     client: reqwest::Client,
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalMode {
+    Pass,
+    Block,
+}
+
+impl ApprovalMode {
+    fn from_env() -> Self {
+        match std::env::var("APPROVAL_MODE")
+            .unwrap_or_else(|_| "pass".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "block" => ApprovalMode::Block,
+            _ => ApprovalMode::Pass,
+        }
+    }
 }
 
 #[tokio::main]
@@ -37,6 +57,7 @@ async fn main() {
     let state = Arc::new(AppState {
         upstream,
         sca_address,
+        approval_mode: ApprovalMode::from_env(),
         client: reqwest::Client::new(),
     });
 
@@ -103,8 +124,26 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }));
     }
 
-    if method == "eth_sendTransaction" || method == "eth_sendRawTransaction" {
-        info!("{} intercepted and forwarded", method);
+    if method == "eth_sendTransaction" {
+        log_send_tx(req);
+        if matches!(state.approval_mode, ApprovalMode::Block) {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32001, "message": "hardware approval required"}
+            }));
+        }
+    }
+
+    if method == "eth_sendRawTransaction" {
+        log_send_raw(req);
+        if matches!(state.approval_mode, ApprovalMode::Block) {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32001, "message": "hardware approval required"}
+            }));
+        }
     }
 
     // Forward any other RPC to upstream
@@ -143,4 +182,47 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
             }))
         }
     }
+}
+
+fn log_send_tx(req: &Value) {
+    let params = req.get("params").and_then(|p| p.as_array());
+    let tx = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+    if let Some(tx) = tx {
+        let from = tx.get("from").and_then(|v| v.as_str()).unwrap_or("-");
+        let to = tx.get("to").and_then(|v| v.as_str()).unwrap_or("-");
+        let value = tx
+            .get("value")
+            .and_then(|v| v.as_str())
+            .and_then(hex_to_u128);
+        let data_len = tx
+            .get("data")
+            .and_then(|v| v.as_str())
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        info!(
+            "eth_sendTransaction from={} to={} value={} data_len={}",
+            from,
+            to,
+            value.map(|v| v.to_string()).unwrap_or("-".into()),
+            data_len
+        );
+    } else {
+        info!("eth_sendTransaction received");
+    }
+}
+
+fn log_send_raw(req: &Value) {
+    let params = req.get("params").and_then(|p| p.as_array());
+    let raw = params.and_then(|p| p.get(0)).and_then(|v| v.as_str());
+    if let Some(raw) = raw {
+        info!("eth_sendRawTransaction len={}", raw.len());
+    } else {
+        info!("eth_sendRawTransaction received");
+    }
+}
+
+fn hex_to_u128(s: &str) -> Option<u128> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    u128::from_str_radix(s, 16).ok()
 }
