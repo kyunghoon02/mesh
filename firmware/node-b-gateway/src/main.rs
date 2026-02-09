@@ -2,6 +2,7 @@
 #![no_main]
 
 mod comm;
+mod serial;
 
 use esp_backtrace as _;
 use esp_hal::{
