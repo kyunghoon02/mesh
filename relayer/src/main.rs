@@ -9,13 +9,17 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+mod serial;
+use serial::SerialClient;
 
 #[derive(Clone)]
 struct AppState {
     upstream: String,
     sca_address: String,
     approval_mode: ApprovalMode,
+    serial: Option<SerialClient>,
     client: reqwest::Client,
 }
 
@@ -44,9 +48,32 @@ async fn main() {
         .with_env_filter("info")
         .init();
 
+    // 필수: 업스트림 RPC, SCA 주소
     let upstream = std::env::var("UPSTREAM_RPC").unwrap_or_default();
     let sca_address = std::env::var("SCA_ADDRESS").unwrap_or_default();
+    // 선택: 바인딩 주소
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+
+    // 선택: Node B Serial 연결
+    let serial_port = std::env::var("SERIAL_PORT").ok();
+    let serial_baud: u32 = std::env::var("SERIAL_BAUD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(115_200);
+
+    let serial = match serial_port.as_deref() {
+        Some(port) => match SerialClient::open(port, serial_baud).await {
+            Ok(c) => {
+                info!("serial connected: {} @{}", port, serial_baud);
+                Some(c)
+            }
+            Err(e) => {
+                warn!("serial open failed: {}", e);
+                None
+            }
+        },
+        None => None,
+    };
 
     if upstream.is_empty() || sca_address.is_empty() {
         eprintln!(
@@ -58,6 +85,7 @@ async fn main() {
         upstream,
         sca_address,
         approval_mode: ApprovalMode::from_env(),
+        serial,
         client: reqwest::Client::new(),
     });
 
@@ -122,6 +150,29 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
             "id": id,
             "result": [state.sca_address],
         }));
+    }
+
+    if method == "mesh_getStatus" {
+        if let Some(serial) = &state.serial {
+            match serial.get_status().await {
+                Ok(status) => {
+                    return Some(json!({"jsonrpc":"2.0","id":id,"result": status}));
+                }
+                Err(e) => {
+                    return Some(json!({
+                        "jsonrpc":"2.0",
+                        "id":id,
+                        "error": {"code": -32010, "message": e}
+                    }));
+                }
+            }
+        } else {
+            return Some(json!({
+                "jsonrpc":"2.0",
+                "id":id,
+                "error": {"code": -32010, "message": "SERIAL_PORT not configured"}
+            }));
+        }
     }
 
     if method == "eth_sendTransaction" {

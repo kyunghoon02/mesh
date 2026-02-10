@@ -11,3 +11,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+postcard = { version = "1.0", features = ["alloc"] }
+tokio-serial = "5.4"
+common = { path = "../common" }
