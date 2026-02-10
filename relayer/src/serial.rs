@@ -1,6 +1,6 @@
 ﻿use std::sync::Arc;
 
-use common::{SerialCommand, SerialFrame, SerialResponse};
+use common::{SerialCommand, SerialFrame, SerialResponse, SecurePacket};
 use postcard::{from_bytes, to_allocvec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -41,9 +41,20 @@ impl SerialClient {
         Ok(data[0])
     }
 
+    pub async fn send_sign_request(
+        &self,
+        sequence_id: u32,
+        packet: &SecurePacket,
+    ) -> Result<SerialResponse, String> {
+        let payload = to_allocvec(packet).map_err(|e| e.to_string())?;
+        let frame = SerialFrame::new(SerialCommand::SignRequest, sequence_id, &payload)
+            .ok_or("frame build failed")?;
+        self.send_frame(frame).await
+    }
+
     pub async fn send_frame(&self, frame: SerialFrame) -> Result<SerialResponse, String> {
         let mut guard = self.inner.lock().await;
-        // length-prefixed frame: [len_lo, len_hi, payload...]
+        // 길이 프리픽스 프레임: [len_lo, len_hi, payload...]
         let bytes = to_allocvec(&frame).map_err(|e| e.to_string())?;
         let len = bytes.len() as u16;
 

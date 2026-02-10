@@ -1,4 +1,7 @@
-﻿use std::sync::Arc;
+﻿use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc,
+};
 
 use axum::{
     body::Bytes,
@@ -11,6 +14,8 @@ use axum::{
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
 
+use common::{PacketType, SecurePacket};
+
 mod serial;
 use serial::SerialClient;
 
@@ -20,6 +25,8 @@ struct AppState {
     sca_address: String,
     approval_mode: ApprovalMode,
     serial: Option<SerialClient>,
+    seq: Arc<AtomicU32>,
+    counter: Arc<AtomicU64>,
     client: reqwest::Client,
 }
 
@@ -86,6 +93,8 @@ async fn main() {
         sca_address,
         approval_mode: ApprovalMode::from_env(),
         serial,
+        seq: Arc::new(AtomicU32::new(1)),
+        counter: Arc::new(AtomicU64::new(1)),
         client: reqwest::Client::new(),
     });
 
@@ -177,23 +186,15 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
 
     if method == "eth_sendTransaction" {
         log_send_tx(req);
-        if matches!(state.approval_mode, ApprovalMode::Block) {
-            return Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": -32001, "message": "hardware approval required"}
-            }));
+        if let Some(resp) = send_sign_request_if_possible(state, req, method).await {
+            return Some(resp);
         }
     }
 
     if method == "eth_sendRawTransaction" {
         log_send_raw(req);
-        if matches!(state.approval_mode, ApprovalMode::Block) {
-            return Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": -32001, "message": "hardware approval required"}
-            }));
+        if let Some(resp) = send_sign_request_if_possible(state, req, method).await {
+            return Some(resp);
         }
     }
 
@@ -233,6 +234,87 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
             }))
         }
     }
+}
+
+async fn send_sign_request_if_possible(
+    state: &AppState,
+    req: &Value,
+    method: &str,
+) -> Option<Value> {
+    let require_hw = matches!(state.approval_mode, ApprovalMode::Block);
+
+    let serial = match &state.serial {
+        Some(s) => s,
+        None => {
+            if require_hw {
+                return Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "error": {"code": -32011, "message": "SERIAL_PORT not configured"}
+                }));
+            }
+            return None;
+        }
+    };
+
+    // SecurePacket 생성 (암호화는 추후 구현, 현재는 payload에 축약 데이터만 담음)
+    let counter = state.counter.fetch_add(1, Ordering::Relaxed);
+    let packet = build_secure_packet(method, req, counter);
+
+    let seq = state.seq.fetch_add(1, Ordering::Relaxed);
+    match serial.send_sign_request(seq, &packet).await {
+        Ok(resp) => {
+            if resp.success {
+                None
+            } else if require_hw {
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "error": {"code": -32012, "message": format!("hardware rejected: {}", resp.error_code)}
+                }))
+            } else {
+                warn!("hardware rejected: {}", resp.error_code);
+                None
+            }
+        }
+        Err(e) => {
+            if require_hw {
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "error": {"code": -32012, "message": e}
+                }))
+            } else {
+                warn!("serial send failed: {}", e);
+                None
+            }
+        }
+    }
+}
+
+fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket {
+    let mut payload = match method {
+        "eth_sendRawTransaction" => req
+            .get("params")
+            .and_then(|p| p.get(0))
+            .and_then(|v| v.as_str())
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        _ => req
+            .get("params")
+            .and_then(|p| p.get(0))
+            .map(|v| serde_json::to_vec(v).unwrap_or_default())
+            .unwrap_or_default(),
+    };
+
+    if payload.len() > 192 {
+        payload.truncate(192);
+    }
+
+    let mut packet = SecurePacket::new(PacketType::SignRequest, &payload, [0u8; 16])
+        .unwrap_or_else(|| SecurePacket::new(PacketType::SignRequest, &[], [0u8; 16]).unwrap());
+    packet.counter = counter;
+    packet
 }
 
 fn log_send_tx(req: &Value) {
