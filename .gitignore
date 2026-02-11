@@ -1,7 +1,7 @@
 ﻿/target
 plan.md
 prd.md
-/contracts/--std/lib
-/contracts/--std/out
-/contracts/--std/cache
-/contracts/--std/broadcast
+/contracts/lib
+/contracts/out
+/contracts/cache
+/contracts/broadcast

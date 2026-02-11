@@ -12,6 +12,8 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
+use tokio_postgres::{Client as PgClient, NoTls};
 use tracing::{error, info, warn};
 
 use common::{PacketType, SecurePacket};
@@ -22,7 +24,11 @@ use serial::SerialClient;
 #[derive(Clone)]
 struct AppState {
     upstream: String,
+    eoa_address: String,
     sca_address: String,
+    factory_address: Option<String>,
+    db: Option<Arc<PgClient>>,
+    chain_id: Option<u64>,
     approval_mode: ApprovalMode,
     serial: Option<SerialClient>,
     seq: Arc<AtomicU32>,
@@ -55,9 +61,12 @@ async fn main() {
         .with_env_filter("info")
         .init();
 
-    // 필수: 업스트림 RPC, SCA 주소
+    // 필수: 업스트림 RPC
     let upstream = std::env::var("UPSTREAM_RPC").unwrap_or_default();
+    let eoa_address = std::env::var("EOA_ADDRESS").unwrap_or_default();
     let sca_address = std::env::var("SCA_ADDRESS").unwrap_or_default();
+    let factory_address = std::env::var("FACTORY_ADDRESS").ok();
+    let db_url = std::env::var("DATABASE_URL").ok();
     // 선택: 바인딩 주소
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
@@ -82,20 +91,42 @@ async fn main() {
         None => None,
     };
 
-    if upstream.is_empty() || sca_address.is_empty() {
-        eprintln!(
-            "Missing env vars: UPSTREAM_RPC and/or SCA_ADDRESS. Server will still start but will return 500."
-        );
+    if upstream.is_empty() {
+        eprintln!("Missing env var: UPSTREAM_RPC. Server will still start but will return 500.");
     }
+    if eoa_address.is_empty() && sca_address.is_empty() {
+        eprintln!("Missing env vars: EOA_ADDRESS or SCA_ADDRESS.");
+    }
+
+    let client = reqwest::Client::new();
+    let chain_id = match std::env::var("CHAIN_ID") {
+        Ok(v) => parse_chain_id_str(&v),
+        Err(_) => {
+            if upstream.is_empty() {
+                None
+            } else {
+                fetch_chain_id(&client, &upstream).await
+            }
+        }
+    };
+
+    let db = match db_url {
+        Some(url) => init_db(&url).await,
+        None => None,
+    };
 
     let state = Arc::new(AppState {
         upstream,
+        eoa_address,
         sca_address,
+        factory_address,
+        db,
+        chain_id,
         approval_mode: ApprovalMode::from_env(),
         serial,
         seq: Arc::new(AtomicU32::new(1)),
         counter: Arc::new(AtomicU64::new(1)),
-        client: reqwest::Client::new(),
+        client,
     });
 
     let app = Router::new().route("/", post(rpc_handler)).with_state(state);
@@ -154,10 +185,11 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     let method = obj.get("method")?.as_str()?;
 
     if method == "eth_accounts" || method == "eth_requestAccounts" {
+        let addr = resolve_account(state).await;
         return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": [state.sca_address],
+            "result": [addr],
         }));
     }
 
@@ -182,6 +214,18 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
                 "error": {"code": -32010, "message": "SERIAL_PORT not configured"}
             }));
         }
+    }
+
+    if method == "mesh_prepareDeploy" {
+        return Some(handle_prepare_deploy(req, state).await);
+    }
+
+    if method == "mesh_getChainConfig" {
+        return Some(handle_get_chain_config(req, state).await);
+    }
+
+    if method == "mesh_setChainConfig" {
+        return Some(handle_set_chain_config(req, state).await);
     }
 
     if method == "eth_sendTransaction" {
@@ -233,6 +277,221 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
                 "error": {"code": -32000, "message": "upstream request failed"}
             }))
         }
+    }
+}
+
+async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let owner = first
+        .and_then(|m| m.get("owner"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let from = first
+        .and_then(|m| m.get("from"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let passkey = first
+        .and_then(|m| {
+            m.get("passkey_pubkey")
+                .or_else(|| m.get("passkeyPubkey"))
+        })
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_bytes);
+
+    let salt = first
+        .and_then(|m| m.get("salt"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_bytes32)
+        .unwrap_or([0u8; 32]);
+
+    let factory = first
+        .and_then(|m| m.get("factory"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| state.factory_address.clone());
+
+    let owner = match owner {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid owner"}
+            })
+        }
+    };
+
+    let passkey = match passkey {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid passkey_pubkey"}
+            })
+        }
+    };
+
+    let factory = match factory {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing factory address"}
+            })
+        }
+    };
+
+    let calldata = encode_create_account(owner, &passkey, salt);
+    let data_hex = to_hex(&calldata);
+
+    let mut tx = json!({
+        "to": factory,
+        "data": data_hex,
+        "value": "0x0"
+    });
+
+    if let Some(from_addr) = from {
+        tx["from"] = Value::String(address_to_hex(from_addr));
+    }
+
+    let predicted = if !state.upstream.is_empty() {
+        fetch_predicted_address(state, &factory, owner, &passkey, salt).await
+    } else {
+        None
+    };
+
+    json!({
+        "jsonrpc":"2.0",
+        "id": id,
+        "result": {
+            "tx": tx,
+            "request": {
+                "method": "eth_sendTransaction",
+                "params": [tx],
+                "jsonrpc": "2.0",
+                "id": 1
+            },
+            "predicted_address": predicted
+        }
+    })
+}
+
+async fn handle_get_chain_config(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let chain_id = extract_chain_id(req).or(state.chain_id);
+
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            })
+        }
+    };
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            })
+        }
+    };
+
+    match get_chain_config(db, chain_id).await {
+        Ok(Some(cfg)) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": cfg
+        }),
+        Ok(None) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": null
+        }),
+        Err(e) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": e}
+        }),
+    }
+}
+
+async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            })
+        }
+    };
+
+    let mode = first
+        .and_then(|m| m.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("EOA");
+
+    let sca_address = first
+        .and_then(|m| m.get("sca_address"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let factory_address = first
+        .and_then(|m| m.get("factory_address"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let status = first
+        .and_then(|m| m.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("inactive")
+        .to_string();
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            })
+        }
+    };
+
+    match upsert_chain_config(db, chain_id, mode, sca_address, factory_address, status).await {
+        Ok(_) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": true
+        }),
+        Err(e) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": e}
+        }),
     }
 }
 
@@ -358,4 +617,280 @@ fn log_send_raw(req: &Value) {
 fn hex_to_u128(s: &str) -> Option<u128> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     u128::from_str_radix(s, 16).ok()
+}
+
+fn parse_chain_id_str(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+fn parse_chain_id_value(v: &Value) -> Option<u64> {
+    if let Some(s) = v.as_str() {
+        return parse_chain_id_str(s);
+    }
+    v.as_u64()
+}
+
+fn extract_chain_id(req: &Value) -> Option<u64> {
+    let params = req.get("params")?.as_array()?;
+    let first = params.get(0)?;
+    if let Some(obj) = first.as_object() {
+        return obj.get("chain_id").and_then(parse_chain_id_value);
+    }
+    None
+}
+
+fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    hex::decode(s).ok()
+}
+
+fn parse_address(s: &str) -> Option<[u8; 20]> {
+    let bytes = parse_hex_bytes(s)?;
+    if bytes.len() != 20 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+fn parse_bytes32(s: &str) -> Option<[u8; 32]> {
+    let bytes = parse_hex_bytes(s)?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+fn parse_abi_address(s: &str) -> Option<[u8; 20]> {
+    let bytes = parse_hex_bytes(s)?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&bytes[12..]);
+    Some(out)
+}
+
+fn address_to_hex(addr: [u8; 20]) -> String {
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    out.push_str(&hex::encode(addr));
+    out
+}
+
+fn to_hex(data: &[u8]) -> String {
+    let mut out = String::with_capacity(2 + data.len() * 2);
+    out.push_str("0x");
+    out.push_str(&hex::encode(data));
+    out
+}
+
+fn encode_create_account(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Vec<u8> {
+    // function selector: createAccount(address,bytes,bytes32)
+    let mut hasher = Keccak256::new();
+    hasher.update(b"createAccount(address,bytes,bytes32)");
+    let selector = &hasher.finalize()[..4];
+
+    let mut out = Vec::with_capacity(4 + 32 * 3 + 32 + passkey.len() + 32);
+    out.extend_from_slice(selector);
+
+    // head (3 * 32 bytes)
+    // 1) address owner
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&owner);
+    // 2) offset to bytes data (0x60)
+    out.extend_from_slice(&u256_be(0x60));
+    // 3) bytes32 salt
+    out.extend_from_slice(&salt);
+
+    // tail: bytes length + data + padding
+    out.extend_from_slice(&u256_be(passkey.len() as u64));
+    out.extend_from_slice(passkey);
+    let pad = (32 - (passkey.len() % 32)) % 32;
+    if pad != 0 {
+        out.extend_from_slice(&vec![0u8; pad]);
+    }
+    out
+}
+
+fn u256_be(value: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn encode_get_address(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Vec<u8> {
+    // function selector: getAddress(address,bytes,bytes32)
+    let mut hasher = Keccak256::new();
+    hasher.update(b"getAddress(address,bytes,bytes32)");
+    let selector = &hasher.finalize()[..4];
+
+    let mut out = Vec::with_capacity(4 + 32 * 3 + 32 + passkey.len() + 32);
+    out.extend_from_slice(selector);
+
+    // head (3 * 32 bytes)
+    // 1) address owner
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&owner);
+    // 2) offset to bytes data (0x60)
+    out.extend_from_slice(&u256_be(0x60));
+    // 3) bytes32 salt
+    out.extend_from_slice(&salt);
+
+    // tail: bytes length + data + padding
+    out.extend_from_slice(&u256_be(passkey.len() as u64));
+    out.extend_from_slice(passkey);
+    let pad = (32 - (passkey.len() % 32)) % 32;
+    if pad != 0 {
+        out.extend_from_slice(&vec![0u8; pad]);
+    }
+    out
+}
+
+async fn fetch_predicted_address(
+    state: &AppState,
+    factory: &str,
+    owner: [u8; 20],
+    passkey: &[u8],
+    salt: [u8; 32],
+) -> Option<String> {
+    let calldata = encode_get_address(owner, passkey, salt);
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{
+            "to": factory,
+            "data": to_hex(&calldata)
+        }, "latest"]
+    });
+
+    let resp = state.client.post(&state.upstream).json(&payload).send().await.ok()?;
+    let v: Value = resp.json().await.ok()?;
+    let result = v.get("result")?.as_str()?;
+    let addr = parse_abi_address(result)?;
+    Some(address_to_hex(addr))
+}
+
+async fn init_db(url: &str) -> Option<Arc<PgClient>> {
+    let (client, connection) = tokio_postgres::connect(url, NoTls).await.ok()?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            error!("postgres connection error: {}", e);
+        }
+    });
+
+    if let Err(e) = client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS chain_registry (
+                chain_id BIGINT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                sca_address TEXT,
+                factory_address TEXT,
+                status TEXT NOT NULL DEFAULT 'inactive',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+    {
+        error!("postgres init failed: {}", e);
+        return None;
+    }
+
+    Some(Arc::new(client))
+}
+
+async fn fetch_chain_id(client: &reqwest::Client, upstream: &str) -> Option<u64> {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_chainId",
+        "params": []
+    });
+    let resp = client.post(upstream).json(&payload).send().await.ok()?;
+    let v: Value = resp.json().await.ok()?;
+    let result = v.get("result")?.as_str()?;
+    parse_chain_id_str(result)
+}
+
+async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Value>, String> {
+    let row = db
+        .query_opt(
+            "SELECT chain_id, mode, sca_address, factory_address, status, updated_at \
+             FROM chain_registry WHERE chain_id = $1",
+            &[&(chain_id as i64)],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let row = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    Ok(Some(json!({
+        "chain_id": row.get::<_, i64>(0) as u64,
+        "mode": row.get::<_, String>(1),
+        "sca_address": row.get::<_, Option<String>>(2),
+        "factory_address": row.get::<_, Option<String>>(3),
+        "status": row.get::<_, String>(4),
+        "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(5).to_rfc3339(),
+    })))
+}
+
+async fn upsert_chain_config(
+    db: &PgClient,
+    chain_id: u64,
+    mode: &str,
+    sca_address: Option<String>,
+    factory_address: Option<String>,
+    status: String,
+) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO chain_registry (chain_id, mode, sca_address, factory_address, status) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (chain_id) DO UPDATE SET \
+           mode = EXCLUDED.mode, \
+           sca_address = EXCLUDED.sca_address, \
+           factory_address = EXCLUDED.factory_address, \
+           status = EXCLUDED.status, \
+           updated_at = NOW()",
+        &[&(chain_id as i64), &mode, &sca_address, &factory_address, &status],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn resolve_account(state: &AppState) -> String {
+    if let (Some(db), Some(chain_id)) = (&state.db, state.chain_id) {
+        if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+            if let Some(mode) = cfg.get("mode").and_then(|v| v.as_str()) {
+                if mode.eq_ignore_ascii_case("SCA") {
+                    if let Some(addr) = cfg.get("sca_address").and_then(|v| v.as_str()) {
+                        return addr.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    if !state.eoa_address.is_empty() {
+        return state.eoa_address.clone();
+    }
+    if !state.sca_address.is_empty() {
+        return state.sca_address.clone();
+    }
+    String::new()
 }
