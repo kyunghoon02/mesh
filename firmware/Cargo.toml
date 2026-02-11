@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "node-a-signer",
+    "node-b-gateway",
+]
+resolver = "2"

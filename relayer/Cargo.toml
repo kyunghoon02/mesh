@@ -15,6 +15,7 @@ postcard = { version = "1.0", features = ["alloc"] }
 tokio-serial = "5.4"
 sha3 = "0.10"
 hex = "0.4"
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 chrono = { version = "0.4", features = ["clock"] }
+dotenvy = "0.15"
 common = { path = "../common" }

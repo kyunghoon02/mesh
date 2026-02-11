@@ -5,3 +5,5 @@ prd.md
 /contracts/out
 /contracts/cache
 /contracts/broadcast
+/relayer/.env
+mesh.pen

@@ -2,6 +2,7 @@
 
 use heapless::String;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 /// Endianness policy: postcard uses Little Endian.
@@ -23,6 +24,7 @@ pub struct SecurePacket {
     pub counter: u64,          // Anti-replay counter
     pub payload_type: PacketType,
     pub ciphertext_len: u8,    // 0..=192
+    #[serde(with = "BigArray")]
     pub ciphertext: [u8; 192], // ESP-NOW 250-byte limit (with padding)
     pub auth_tag: [u8; 16],    // AEAD authentication tag
 }
@@ -80,6 +82,7 @@ pub enum SerialCommand {
 pub struct SerialFrame {
     pub command: SerialCommand,
     pub sequence_id: u32, // Anti-replay counter for Serial layer
+    #[serde(with = "BigArray")]
     pub payload: [u8; 240], // Max payload size (fits SecurePacket)
     pub payload_len: u16,
 }
@@ -110,6 +113,7 @@ pub struct SerialResponse {
     pub sequence_id: u32, // Matches request sequence_id
     pub success: bool,
     pub error_code: u8, // 0 = success, others = error codes
+    #[serde(with = "BigArray")]
     pub payload: [u8; 240],
     pub payload_len: u16,
 }

@@ -16,7 +16,7 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = [
 members = [
     "common",
     "relayer",
-    "firmware/node-a-signer",
-    "firmware/node-b-gateway",
 ]
+exclude = ["firmware/*"]
+default-members = ["relayer"]
 resolver = "2"
