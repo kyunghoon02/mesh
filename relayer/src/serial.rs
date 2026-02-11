@@ -13,7 +13,7 @@ pub struct SerialClient {
 
 impl SerialClient {
     pub async fn open(port: &str, baud: u32) -> Result<Self, String> {
-        // Windows: COM 포트(예: COM5), macOS/Linux: /dev/tty.*
+        // Windows는 COM 포트(예: COM5), macOS/Linux는 /dev/tty.*
         let builder = tokio_serial::new(port, baud)
             .data_bits(DataBits::Eight)
             .stop_bits(StopBits::One)
@@ -27,7 +27,7 @@ impl SerialClient {
     }
 
     pub async fn get_status(&self) -> Result<u8, String> {
-        // Node B 상태 조회 (0=Unpaired, 1=Pairing, 2=Ready)
+        // Node B 상태 조회 (0=미페어링, 1=페어링, 2=준비)
         let frame = SerialFrame::new(SerialCommand::GetStatus, 1, &[])
             .ok_or("frame build failed")?;
         let resp = self.send_frame(frame).await?;
@@ -54,7 +54,7 @@ impl SerialClient {
 
     pub async fn send_frame(&self, frame: SerialFrame) -> Result<SerialResponse, String> {
         let mut guard = self.inner.lock().await;
-        // 길이 프리픽스 프레임: [len_lo, len_hi, payload...]
+        // 길이 프리픽스 프레임: [len_lo, len_hi, 페이로드...]
         let bytes = to_allocvec(&frame).map_err(|e| e.to_string())?;
         let len = bytes.len() as u16;
 
