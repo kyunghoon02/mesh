@@ -19,6 +19,7 @@ use postcard::to_slice;
 
 // 개발 단계: Node A MAC 주소 (페어링 로직으로 교체 예정)
 const NODE_A_MAC: [u8; 6] = [0x30, 0xAE, 0xA4, 0x98, 0x76, 0x54];
+const SERIAL_ERR_PREFIX: u8 = 0xFF;
 
 #[entry]
 fn main() -> ! {
@@ -56,9 +57,14 @@ fn main() -> ! {
 
     loop {
         // Serial -> ESP-NOW
-        if let Ok(len) = serial.read_frame_blocking(&mut rx_buf) {
-            if let Ok(packet) = postcard::from_bytes::<common::SecurePacket>(&rx_buf[..len]) {
-                let _ = comm.send_packet(&packet);
+        match serial.read_frame_blocking(&mut rx_buf) {
+            Ok(len) => {
+                if let Ok(packet) = postcard::from_bytes::<common::SecurePacket>(&rx_buf[..len]) {
+                    let _ = comm.send_packet(&packet);
+                }
+            }
+            Err(e) => {
+                let _ = serial.write_frame(&[SERIAL_ERR_PREFIX, e as u8]);
             }
         }
 
