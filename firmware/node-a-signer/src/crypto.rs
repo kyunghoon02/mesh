@@ -1,4 +1,6 @@
-ï»¿use esp_hal::rng::Rng;
+use esp_hal::rng::Rng;
+use k256::ecdsa::signature::hazmat::PrehashSigner;
+use k256::ecdsa::SigningKey;
 use k256::SecretKey;
 use sha3::{Digest, Keccak256};
 
@@ -8,7 +10,7 @@ pub struct KeyManager {
 
 impl KeyManager {
     pub fn generate_new(rng: &mut Rng) -> Self {
-        // ìœ íš¨í•œ Secp256k1 í‚¤ê°€ ìƒì„±ë  ë•Œê¹Œì§€ ì¬ì‹œë„
+        // À¯È¿ÇÑ Secp256k1 Å°°¡ »ı¼ºµÉ ¶§±îÁö Àç½Ãµµ
         loop {
             let mut seed = [0u8; 32];
             rng.read(&mut seed);
@@ -20,7 +22,7 @@ impl KeyManager {
     }
 
     pub fn get_eth_address(&self) -> [u8; 20] {
-        // ê³µê°œí‚¤(ë¹„ì••ì¶•) -> Keccak256 -> ë§ˆì§€ë§‰ 20ë°”ì´íŠ¸
+        // °ø°³Å°(ºñ¾ĞÃà) -> Keccak256 -> ¸¶Áö¸· 20¹ÙÀÌÆ®
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let public_key = self.secret_key.public_key();
         let encoded_point = public_key.to_encoded_point(false);
@@ -33,5 +35,15 @@ impl KeyManager {
         let mut address = [0u8; 20];
         address.copy_from_slice(&hash[12..32]);
         address
+    }
+
+    pub fn sign_hash(&self, hash32: &[u8; 32]) -> Option<[u8; 65]> {
+        let signing_key = SigningKey::from(&self.secret_key);
+        let signature = signing_key.sign_prehash(hash32).ok()?;
+        let mut out = [0u8; 65];
+        out[..64].copy_from_slice(&signature.to_bytes());
+        // TODO: recovery id(v)´Â ¿©±â¼­ °è»êÇÏÁö ¾ÊÀ½.
+        out[64] = 0;
+        Some(out)
     }
 }

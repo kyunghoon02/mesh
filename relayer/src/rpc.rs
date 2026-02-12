@@ -751,7 +751,7 @@ async fn send_sign_request_if_possible(
 }
 
 fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket {
-    let mut payload = match method {
+    let payload = match method {
         "eth_sendRawTransaction" => req
             .get("params")
             .and_then(|p| p.get(0))
@@ -765,11 +765,9 @@ fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket 
             .unwrap_or_default(),
     };
 
-    if payload.len() > 192 {
-        payload.truncate(192);
-    }
+    let hash = Keccak256::digest(&payload);
 
-    let mut packet = SecurePacket::new(PacketType::SignRequest, &payload, [0u8; 16])
+    let mut packet = SecurePacket::new(PacketType::SignRequest, &hash, [0u8; 16])
         .unwrap_or_else(|| SecurePacket::new(PacketType::SignRequest, &[], [0u8; 16]).unwrap());
     packet.counter = counter;
     packet

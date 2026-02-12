@@ -9,6 +9,11 @@ esp-wifi = { version = "0.15.1", features = ["esp32s3", "wifi", "esp-now"] }
 esp-storage = { version = "0.8.1", features = ["esp32s3"] }
 embedded-storage = "0.3.1"
 esp-partition-table = "0.1.0"
+# 암호화/서명
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+sha3 = { version = "0.10", default-features = false }
+
+common = { path = "../../common" }
 # 그래픽/디스플레이 드라이버
 embedded-graphics = "0.8.1"
 st7789 = "0.7.0"                # LilyGO T-Display S3 드라이버 (또는 mipidsi)
