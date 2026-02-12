@@ -1,4 +1,5 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
+use core::fmt::Write;
 use std::sync::atomic::Ordering;
 
 use axum::{
@@ -12,7 +13,8 @@ use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 use tracing::{error, info, warn};
 
-use common::{PacketType, SecurePacket};
+use common::{PacketType, SecurePacket, SignRequestPayload, TransactionIntent};
+use heapless::String as HString;
 
 use crate::abi::{
     address_to_hex, encode_create_account, encode_get_address, parse_address, parse_bytes32,
@@ -60,7 +62,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     let has_id = obj.contains_key("id");
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
 
-    // 알림 요청은 응답하지 않음
+    // ?뚮┝ ?붿껌? ?묐떟?섏? ?딆쓬
     if !has_id || id.is_null() {
         return None;
     }
@@ -137,7 +139,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }
     }
 
-    // 그 외 RPC는 업스트림으로 전달
+    // 洹???RPC???낆뒪?몃┝?쇰줈 ?꾨떖
     let upstream = resolve_upstream(state, req).await;
     if upstream.is_empty() {
         return Some(json!({
@@ -715,7 +717,7 @@ async fn send_sign_request_if_possible(
         }
     };
 
-    // SecurePacket 생성 (암호화는 추후 구현, 현재는 페이로드에 축약 데이터만 담음)
+    // SecurePacket ?앹꽦 (?뷀샇?붾뒗 異뷀썑 援ы쁽, ?꾩옱???섏씠濡쒕뱶??異뺤빟 ?곗씠?곕쭔 ?댁쓬)
     let counter = state.counter.fetch_add(1, Ordering::Relaxed);
     let packet = build_secure_packet(method, req, counter);
 
@@ -766,11 +768,121 @@ fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket 
     };
 
     let hash = Keccak256::digest(&payload);
+    let mut hash32 = [0u8; 32];
+    hash32.copy_from_slice(&hash);
 
-    let mut packet = SecurePacket::new(PacketType::SignRequest, &hash, [0u8; 16])
+    let intent = build_intent(method, req);
+    let payload_struct = SignRequestPayload {
+        hash: hash32,
+        intent,
+    };
+    let mut plain_buf = [0u8; 192];
+    let plain_len = match postcard::to_slice(&payload_struct, &mut plain_buf) {
+        Ok(slice) => slice.len(),
+        Err(_) => {
+            plain_buf[..32].copy_from_slice(&hash32);
+            32
+        }
+    };
+    let plain = &plain_buf[..plain_len];
+
+    let boot_id = 1u32;
+
+    let (ciphertext, tag) = encrypt_payload(boot_id, counter, plain);
+    let mut packet = SecurePacket::new(PacketType::SignRequest, &ciphertext[..plain_len], tag)
         .unwrap_or_else(|| SecurePacket::new(PacketType::SignRequest, &[], [0u8; 16]).unwrap());
     packet.counter = counter;
+    packet.boot_id = boot_id;
     packet
+}
+
+fn encrypt_payload(boot_id: u32, counter: u64, plain: &[u8]) -> ([u8; 192], [u8; 16]) {
+    use chacha20poly1305::{
+        aead::{AeadInPlace, KeyInit},
+        ChaCha20Poly1305, Key, Nonce,
+    };
+
+    let mut buf = [0u8; 192];
+    if !plain.is_empty() {
+        buf[..plain.len()].copy_from_slice(plain);
+    }
+
+    let key = Key::from_slice(&[0u8; 32]);
+    let cipher = ChaCha20Poly1305::new(key);
+    let nonce = build_nonce(boot_id, counter);
+    let tag = if plain.is_empty() {
+        chacha20poly1305::Tag::from_slice(&[0u8; 16]).to_owned()
+    } else {
+        cipher
+            .encrypt_in_place_detached(&nonce, b"", &mut buf[..plain.len()])
+            .expect("aead")
+    };
+    (buf, tag.into())
+}
+
+fn build_nonce(boot_id: u32, counter: u64) -> chacha20poly1305::Nonce {
+    let mut out = [0u8; 12];
+    out[..4].copy_from_slice(&boot_id.to_be_bytes());
+    out[4..].copy_from_slice(&counter.to_be_bytes());
+    chacha20poly1305::Nonce::from_slice(&out).to_owned()
+}
+
+fn build_intent(method: &str, req: &Value) -> TransactionIntent {
+    let chain_id = extract_chain_id(req).unwrap_or(0);
+    let mut target_address = [0u8; 20];
+    let mut eth_value = 0u128;
+    let mut risk_level = 0u8;
+    let mut summary: HString<64> = HString::new();
+
+    if method == "eth_sendTransaction" {
+        let tx = req
+            .get("params")
+            .and_then(|p| p.get(0))
+            .and_then(|v| v.as_object());
+
+        let to = tx.and_then(|m| m.get("to")).and_then(|v| v.as_str());
+        if let Some(addr) = to.and_then(parse_address) {
+            target_address = addr;
+        }
+
+        eth_value = tx
+            .and_then(|m| m.get("value"))
+            .and_then(|v| v.as_str())
+            .and_then(hex_to_u128)
+            .unwrap_or(0);
+
+        let data_present = tx
+            .and_then(|m| m.get("data"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.len() > 2)
+            .unwrap_or(false);
+
+        if to.is_none() {
+            let _ = write!(summary, "Contract Deploy");
+            risk_level = 2;
+        } else if data_present {
+            let _ = write!(summary, "Contract Call");
+            risk_level = 1;
+        } else {
+            let _ = write!(summary, "Transfer");
+            risk_level = 0;
+        }
+
+        if eth_value > 0 {
+            let _ = write!(summary, " {} wei", eth_value);
+        }
+    } else {
+        let _ = write!(summary, "Raw tx");
+        risk_level = 1;
+    }
+
+    TransactionIntent {
+        chain_id,
+        target_address,
+        eth_value,
+        risk_level,
+        summary,
+    }
 }
 
 fn log_send_tx(req: &Value) {

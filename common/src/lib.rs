@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 
 use heapless::String;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,13 @@ pub struct TransactionIntent {
     pub eth_value: u128, // Wei
     pub risk_level: u8,  // 0: Safe, 1: Warning, 2: Danger
     pub summary: String<64>,
+}
+
+/// ?쒕챸 ?붿껌 ?섏씠濡쒕뱶 (?댁떆 + ?ъ슜???섎룄)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignRequestPayload {
+    pub hash: [u8; 32],
+    pub intent: TransactionIntent,
 }
 
 /// Serial Command Set for Node B Gateway

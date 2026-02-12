@@ -18,4 +18,6 @@ hex = "0.4"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 chrono = { version = "0.4", features = ["clock"] }
 dotenvy = "0.15"
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+heapless = "0.8"
 common = { path = "../common" }
