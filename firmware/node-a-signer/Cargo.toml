@@ -12,13 +12,14 @@ esp-partition-table = "0.1.0"
 # 암호화/서명
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 sha3 = { version = "0.10", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false }
 
 common = { path = "../../common" }
 # 그래픽/디스플레이 드라이버
 embedded-graphics = "0.8.1"
-st7789 = "0.7.0"                # LilyGO T-Display S3 드라이버 (또는 mipidsi)
-display-interface-spi = "0.5.0"
+mipidsi = "0.9.0"               # ST7789 병렬(8080) 인터페이스 지원
 
 qrcodegen-no-heap = "1.8.1"
+heapless = "0.8"
 
 postcard = { version = "1.0", default-features = false }
