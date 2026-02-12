@@ -25,6 +25,14 @@ impl<'a> CommManager<'a> {
 
     pub fn receive_packet(&mut self) -> Option<SecurePacket> {
         if let Some(data) = self.esp_now.receive() {
+            // 페어링된 Node A MAC만 허용
+            if data.info.src_addr != self.peer_address {
+                esp_println::println!(
+                    "알 수 없는 기기(MAC: {:?})로부터 패킷 감지 - 차단됨",
+                    data.info.src_addr
+                );
+                return None;
+            }
             let actual = &data.data[..data.len as usize];
             return from_bytes::<SecurePacket>(actual).ok();
         }

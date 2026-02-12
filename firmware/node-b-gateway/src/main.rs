@@ -108,7 +108,11 @@ fn main() -> ! {
         // ESP-NOW 응답 확인 (페어링된 경우)
         if let Some(ref mut comm_mgr) = comm {
             if let Some(packet) = comm_mgr.receive_packet() {
-                let seq = pending.as_ref().map(|p| p.sequence_id).unwrap_or(0);
+                // 대기 중인 요청이 없으면 응답을 무시
+                let seq = match pending.as_ref().map(|p| p.sequence_id) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let payload = to_slice(&packet, &mut response_buf).unwrap_or(&[]);
                 let response = SerialResponse::success(seq, payload)
                     .unwrap_or_else(|| SerialResponse::error(seq, error_codes::INVALID_COMMAND));
