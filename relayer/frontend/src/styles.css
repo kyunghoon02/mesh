@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap");
 
 :root {
   --bg: #f3f4f6;
@@ -6,7 +6,7 @@
   --sidebar: #111827;
   --sidebar-2: #1f2937;
   --text: #111827;
-  --muted: #6b7280;
+  --muted: #4b5563;
   --line: #e5e7eb;
   --danger: #b91c1c;
   --danger-bg: #fee2e2;
@@ -30,9 +30,12 @@ body,
 
 body {
   margin: 0;
-  font-family: "Inter", "Segoe UI", sans-serif;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   background: radial-gradient(circle at 85% 10%, #e5e7eb 0%, transparent 35%), var(--bg);
   color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
 
 .page {
@@ -91,7 +94,7 @@ body {
 
 .menu-item {
   color: #d1d5db;
-  font-size: 13px;
+  font-size: 14px;
   text-decoration: none;
   background: transparent;
   border: 0;
@@ -116,7 +119,7 @@ body {
 .status-box p {
   margin: 0;
   color: #a7f3d0;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -138,7 +141,7 @@ body {
 
 .header h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
 }
 
@@ -161,7 +164,7 @@ body {
 
 .chain-meta {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .row {
@@ -187,7 +190,7 @@ body {
 .input-grid label {
   display: grid;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -195,8 +198,8 @@ body {
   width: 100%;
   border: 1px solid #d1d5db;
   border-radius: 8px;
-  padding: 7px 9px;
-  font-size: 12px;
+  padding: 9px 10px;
+  font-size: 13px;
   color: var(--text);
   background: #fff;
 }
@@ -223,13 +226,13 @@ body {
 
 .card h2 {
   margin: 0 0 8px;
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
 }
 
 .card p {
   margin: 0 0 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -249,11 +252,63 @@ body {
   color: var(--muted) !important;
 }
 
+.spinner {
+  position: relative;
+  width: 18px;
+  height: 6px;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.spinner::before,
+.spinner::after,
+.spinner span {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--amber);
+  opacity: 0.2;
+  animation: dotPulse 0.9s infinite;
+}
+
+.spinner::before {
+  left: 0;
+  animation-delay: 0s;
+}
+
+.spinner span {
+  left: 7px;
+  animation-delay: 0.15s;
+}
+
+.spinner::after {
+  left: 14px;
+  animation-delay: 0.3s;
+}
+
+@keyframes dotPulse {
+  0% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+  100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+}
+
 .btn {
   border: 0;
   border-radius: 10px;
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -296,13 +351,13 @@ body {
 
 .network .table-head span {
   color: #9ca3af;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .network .table-row span {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .section-grid {

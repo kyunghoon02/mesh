@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
 use tracing::{error, info, warn};
 
 use common::{PacketType, SecurePacket};
@@ -17,7 +18,7 @@ use crate::abi::{
     address_to_hex, encode_create_account, encode_get_address, parse_address, parse_bytes32,
     parse_hex_bytes, parse_abi_address, to_hex,
 };
-use crate::db::{get_chain_config, upsert_chain_config};
+use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
 use crate::eth_rpc::fetch_tx_receipt_status;
 use crate::{AppState, ApprovalMode};
 
@@ -110,6 +111,14 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         return Some(handle_set_chain_config(req, state).await);
     }
 
+    if method == "mesh_getPasskey" {
+        return Some(handle_get_passkey(req, state).await);
+    }
+
+    if method == "mesh_setPasskey" {
+        return Some(handle_set_passkey(req, state).await);
+    }
+
     if method == "mesh_confirmDeploy" {
         return Some(handle_confirm_deploy(req, state).await);
     }
@@ -129,7 +138,8 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     }
 
     // 그 외 RPC는 업스트림으로 전달
-    if state.upstream.is_empty() {
+    let upstream = resolve_upstream(state, req).await;
+    if upstream.is_empty() {
         return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -139,7 +149,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
 
     match state
         .client
-        .post(&state.upstream)
+        .post(&upstream)
         .json(req)
         .send()
         .await
@@ -189,17 +199,26 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .and_then(parse_hex_bytes);
 
+    let chain_opt = extract_chain_id(req).or(state.chain_id);
+    let chain_id = chain_opt.unwrap_or(0);
+
     let salt = first
         .and_then(|m| m.get("salt"))
         .and_then(|v| v.as_str())
-        .and_then(parse_bytes32)
-        .unwrap_or([0u8; 32]);
+        .and_then(parse_bytes32);
 
-    let factory = first
-        .and_then(|m| m.get("factory"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| state.factory_address.clone());
+    let mut factory = None;
+    if let (Some(db), Some(chain_id)) = (&state.db, chain_opt) {
+        if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+            factory = cfg
+                .get("factory_address")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+    }
+    if factory.is_none() {
+        factory = state.factory_address.clone();
+    }
 
     let owner = match owner {
         Some(v) => v,
@@ -233,6 +252,15 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
             })
         }
     };
+    if parse_address(&factory).is_none() {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "invalid factory address"}
+        });
+    }
+
+    let salt = salt.unwrap_or_else(|| compute_default_salt(owner, &passkey, chain_id));
 
     let calldata = encode_create_account(owner, &passkey, salt);
     let data_hex = to_hex(&calldata);
@@ -247,10 +275,13 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         tx["from"] = Value::String(address_to_hex(from_addr));
     }
 
-    let predicted = if !state.upstream.is_empty() {
-        fetch_predicted_address(state, &factory, owner, &passkey, salt).await
-    } else {
-        None
+    let predicted = {
+        let upstream = resolve_upstream(state, req).await;
+        if upstream.is_empty() {
+            None
+        } else {
+            fetch_predicted_address(state, &upstream, &factory, owner, &passkey, salt).await
+        }
     };
 
     if let (Some(db), Some(chain_id)) = (&state.db, state.chain_id) {
@@ -260,6 +291,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
             "SCA",
             predicted.clone(),
             Some(factory.clone()),
+            None,
             "pending".to_string(),
         )
         .await;
@@ -357,8 +389,10 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let factory_address = first
-        .and_then(|m| m.get("factory_address"))
+    let factory_address = None;
+
+    let rpc_url = first
+        .and_then(|m| m.get("rpc_url").or_else(|| m.get("rpcUrl")))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -379,11 +413,195 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    match upsert_chain_config(db, chain_id, mode, sca_address, factory_address, status).await {
+    let mut factory_ok = state.factory_address.is_some();
+    if !factory_ok {
+        if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+            factory_ok = cfg
+                .get("factory_address")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+        }
+    }
+    if !factory_ok {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": "FACTORY_ADDRESS not configured"}
+        });
+    }
+    if let Some(factory) = &state.factory_address {
+        if parse_address(factory).is_none() {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "FACTORY_ADDRESS invalid"}
+            });
+        }
+    }
+
+    match upsert_chain_config(db, chain_id, mode, sca_address, factory_address, rpc_url, status).await {
         Ok(_) => json!({
             "jsonrpc":"2.0",
             "id": id,
             "result": true
+        }),
+        Err(e) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": e}
+        }),
+    }
+}
+
+async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let owner = first
+        .and_then(|m| m.get("owner"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+
+    let passkey_hex = first
+        .and_then(|m| {
+            m.get("passkey_pubkey")
+                .or_else(|| m.get("passkeyPubkey"))
+        })
+        .and_then(|v| v.as_str());
+
+    let credential_id = first
+        .and_then(|m| m.get("credential_id").or_else(|| m.get("credentialId")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let rp_id = first
+        .and_then(|m| m.get("rp_id").or_else(|| m.get("rpId")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let owner = match owner {
+        Some(v) => address_to_hex(v),
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid owner"}
+            })
+        }
+    };
+
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            })
+        }
+    };
+
+    let passkey_hex = match passkey_hex.and_then(parse_hex_bytes) {
+        Some(bytes) => to_hex(&bytes),
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid passkey_pubkey"}
+            })
+        }
+    };
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            })
+        }
+    };
+
+    match upsert_passkey(db, &owner, chain_id, &passkey_hex, credential_id, rp_id).await {
+        Ok(_) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": true
+        }),
+        Err(e) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": e}
+        }),
+    }
+}
+
+async fn handle_get_passkey(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let owner = first
+        .and_then(|m| m.get("owner"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+
+    let owner = match owner {
+        Some(v) => address_to_hex(v),
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid owner"}
+            })
+        }
+    };
+
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            })
+        }
+    };
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            })
+        }
+    };
+
+    match get_passkey(db, &owner, chain_id).await {
+        Ok(Some(rec)) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": rec
+        }),
+        Ok(None) => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": null
         }),
         Err(e) => json!({
             "jsonrpc":"2.0",
@@ -413,10 +631,7 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let factory_address = first
-        .and_then(|m| m.get("factory_address"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let factory_address = None;
 
     let chain_id = match chain_id {
         Some(v) => v,
@@ -440,7 +655,8 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    let status = match fetch_tx_receipt_status(&state.client, &state.upstream, tx_hash).await {
+    let upstream = resolve_upstream(state, req).await;
+    let status = match fetch_tx_receipt_status(&state.client, &upstream, tx_hash).await {
         Ok(Some(true)) => "active",
         Ok(Some(false)) => "failed",
         Ok(None) => "pending",
@@ -461,6 +677,7 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 "SCA",
                 sca_address,
                 factory_address,
+                None,
                 status.to_string(),
             )
             .await;
@@ -609,16 +826,29 @@ fn parse_chain_id_value(v: &Value) -> Option<u64> {
 }
 
 fn extract_chain_id(req: &Value) -> Option<u64> {
-    let params = req.get("params")?.as_array()?;
-    let first = params.get(0)?;
-    if let Some(obj) = first.as_object() {
-        return obj.get("chain_id").and_then(parse_chain_id_value);
-    }
-    None
+  let params = req.get("params")?.as_array()?;
+  let first = params.get(0)?;
+  if let Some(obj) = first.as_object() {
+    return obj.get("chain_id").and_then(parse_chain_id_value);
+  }
+  None
+}
+
+fn compute_default_salt(owner: [u8; 20], passkey: &[u8], chain_id: u64) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(b"mesh_salt_v1");
+    hasher.update(owner);
+    hasher.update(passkey);
+    hasher.update(chain_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
 }
 
 async fn fetch_predicted_address(
     state: &AppState,
+    upstream: &str,
     factory: &str,
     owner: [u8; 20],
     passkey: &[u8],
@@ -635,11 +865,25 @@ async fn fetch_predicted_address(
         }, "latest"]
     });
 
-    let resp = state.client.post(&state.upstream).json(&payload).send().await.ok()?;
+    let resp = state.client.post(upstream).json(&payload).send().await.ok()?;
     let v: Value = resp.json().await.ok()?;
     let result = v.get("result")?.as_str()?;
     let addr = parse_abi_address(result)?;
     Some(address_to_hex(addr))
+}
+
+async fn resolve_upstream(state: &AppState, req: &Value) -> String {
+    if let (Some(db), Some(chain_id)) = (&state.db, extract_chain_id(req).or(state.chain_id)) {
+        if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+            if let Some(url) = cfg.get("rpc_url").and_then(|v| v.as_str()) {
+                if !url.trim().is_empty() {
+                    return url.to_string();
+                }
+            }
+        }
+    }
+
+    state.upstream.clone()
 }
 
 async fn resolve_account(state: &AppState) -> String {

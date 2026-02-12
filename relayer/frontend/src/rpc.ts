@@ -57,6 +57,7 @@ export type ChainConfig = {
   mode: string;
   sca_address: string | null;
   factory_address: string | null;
+  rpc_url: string | null;
   status: string;
   updated_at: string;
 };
@@ -72,3 +73,11 @@ export type ConfirmDeployResult = {
   status: "active" | "failed" | "pending";
 };
 
+export type PasskeyRecord = {
+  owner: string;
+  chain_id: number;
+  passkey_pubkey: string;
+  credential_id: string | null;
+  rp_id: string | null;
+  updated_at: string;
+};

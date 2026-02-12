@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { callRpc, type ChainConfig, type ConfirmDeployResult, type PrepareDeployResult } from "./rpc";
+import { callRpc, type ChainConfig, type ConfirmDeployResult, type PasskeyRecord, type PrepareDeployResult } from "./rpc";
+import { registerPasskey } from "./webauthn";
 
 type ViewState = "idle" | "pending" | "active" | "confirm" | "error";
-type SidebarTab = "dashboard" | "chains" | "passkeys" | "logs";
+type SidebarTab = "dashboard" | "settings";
 
 type EthereumProvider = {
   request(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<unknown>;
@@ -14,9 +15,6 @@ declare global {
   }
 }
 
-const SAMPLE_PASSKEY =
-  "0x04b64fa57d6f9691029c7573f861f54b50e26f5d0b6f3120f1a3bc6f0e3b6f17cbb2d5ef829f39ad0f9c5e4f66f3d2dce62ad119cf4a74976f36af1f8a44d0e7d1";
-
 function parseForcedState(): ViewState | null {
   const raw = new URLSearchParams(window.location.search).get("state");
   if (raw === "pending" || raw === "active" || raw === "confirm" || raw === "error" || raw === "idle") {
@@ -27,7 +25,7 @@ function parseForcedState(): ViewState | null {
 
 function parseTabHash(): SidebarTab {
   const raw = window.location.hash.replace("#", "").toLowerCase();
-  if (raw === "chains" || raw === "passkeys" || raw === "logs") return raw;
+  if (raw === "settings") return raw;
   return "dashboard";
 }
 
@@ -45,8 +43,18 @@ function shorten(hex: string | null | undefined): string {
   return `${hex.slice(0, 8)}...${hex.slice(-6)}`;
 }
 
-async function getWalletAccount(): Promise<string | null> {
+async function getWalletAccount(forceSelect = false): Promise<string | null> {
   if (!window.ethereum) return null;
+  if (forceSelect) {
+    try {
+      await window.ethereum.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }]
+      });
+    } catch (error) {
+      // Ignore and fall back to eth_requestAccounts.
+    }
+  }
   const accounts = (await window.ethereum.request({
     method: "eth_requestAccounts"
   })) as string[];
@@ -59,17 +67,19 @@ function App() {
   const [activeTab, setActiveTab] = useState<SidebarTab>(() => parseTabHash());
 
   const [owner, setOwner] = useState("");
-  const [passkeyHex, setPasskeyHex] = useState(SAMPLE_PASSKEY);
+  const [passkeyHex, setPasskeyHex] = useState("");
   const [factory, setFactory] = useState("");
-  const [salt, setSalt] = useState("");
+  const [rpcUrl, setRpcUrl] = useState("");
   const [txHash, setTxHash] = useState("");
   const [runtimeChainId, setRuntimeChainId] = useState<number | null>(null);
+  const [settingsChainId, setSettingsChainId] = useState("");
 
   const [chainConfig, setChainConfig] = useState<ChainConfig | null>(null);
-  const [serialStatus, setSerialStatus] = useState("unknown");
   const [predictedAddress, setPredictedAddress] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
+  const [settingsNotice, setSettingsNotice] = useState("");
+  const [passkeyNotice, setPasskeyNotice] = useState("");
 
   const [logLines, setLogLines] = useState<string[]>([]);
   const [viewState, setViewState] = useState<ViewState>("idle");
@@ -105,6 +115,7 @@ function App() {
         setRuntimeChainId(result.chain_id);
         setViewState(statusToView(result.status));
         if (!factory && result.factory_address) setFactory(result.factory_address);
+        if (!rpcUrl && result.rpc_url) setRpcUrl(result.rpc_url);
         if (result.sca_address) setPredictedAddress(result.sca_address);
       }
     } catch (error) {
@@ -112,24 +123,23 @@ function App() {
     }
   };
 
-  const refreshSerialStatus = async (): Promise<void> => {
-    try {
-      const result = await callRpc<{ link: string; node_a: string; last_error: string }>("mesh_getStatus");
-      setSerialStatus(`${result.link}/${result.node_a}`);
-    } catch (error) {
-      setSerialStatus("not-configured");
-      appendLog(`mesh_getStatus failed: ${(error as Error).message}`);
-    }
-  };
-
   useEffect(() => {
     void refreshChainConfig();
-    void refreshSerialStatus();
 
     const onHashChange = (): void => setActiveTab(parseTabHash());
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (!settingsChainId) {
+      if (chainConfig?.chain_id) {
+        setSettingsChainId(chainConfig.chain_id.toString());
+      } else if (runtimeChainId) {
+        setSettingsChainId(runtimeChainId.toString());
+      }
+    }
+  }, [chainConfig, runtimeChainId, settingsChainId]);
 
   const effectiveViewState = forcedState ?? viewState;
   const isPending = effectiveViewState === "pending";
@@ -137,16 +147,84 @@ function App() {
   const isConfirm = effectiveViewState === "confirm";
   const isError = effectiveViewState === "error";
 
-  const handleUseWallet = async (): Promise<void> => {
+  const handleRegisterPasskey = async (): Promise<void> => {
     setErrorText("");
+    setSettingsNotice("");
+    setPasskeyNotice("");
+    setLoading(true);
     try {
-      const account = await getWalletAccount();
-      if (!account) throw new Error("Failed to load MetaMask account.");
-      setOwner(account);
-      appendLog(`Wallet connected: ${account}`);
+      let effectiveOwner = owner;
+      if (!effectiveOwner) {
+        effectiveOwner = (await getWalletAccount(true)) ?? "";
+        if (!effectiveOwner) {
+          throw new Error("Wallet connection required to store passkey.");
+        }
+        setOwner(effectiveOwner);
+      }
+      const chainId = chainConfig?.chain_id ?? runtimeChainId;
+      if (!chainId) {
+        throw new Error("Chain ID is required to store passkey.");
+      }
+
+      const result = await registerPasskey({
+        rpId: (import.meta.env.VITE_RP_ID as string | undefined) ?? undefined,
+        rpName: (import.meta.env.VITE_RP_NAME as string | undefined) ?? undefined,
+        userName: effectiveOwner || "mesh-user",
+        displayName: effectiveOwner || "mesh-user"
+      });
+      setPasskeyHex(result.publicKeyHex);
+      await callRpc<boolean>("mesh_setPasskey", [
+        {
+          owner: effectiveOwner,
+          chain_id: `0x${chainId.toString(16)}`,
+          passkey_pubkey: result.publicKeyHex,
+          credential_id: result.credentialId,
+          rp_id: result.rpId
+        }
+      ]);
+      setPasskeyNotice("Saved.");
+      appendLog("passkey registered");
     } catch (error) {
-      setErrorText((error as Error).message);
-      setViewState("error");
+      const message = (error as Error).message;
+      setErrorText(message);
+      setPasskeyNotice("");
+      appendLog(`passkey registration failed: ${message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLoadPasskey = async (): Promise<void> => {
+    setErrorText("");
+    setSettingsNotice("");
+    setPasskeyNotice("");
+    try {
+      let effectiveOwner = owner;
+      if (!effectiveOwner) {
+        effectiveOwner = (await getWalletAccount(true)) ?? "";
+        if (!effectiveOwner) {
+          throw new Error("Wallet connection required to load passkey.");
+        }
+        setOwner(effectiveOwner);
+      }
+      const chainId = chainConfig?.chain_id ?? runtimeChainId;
+      if (!chainId) {
+        throw new Error("Chain ID is required to load passkey.");
+      }
+
+      const record = await callRpc<PasskeyRecord | null>("mesh_getPasskey", [
+        { owner: effectiveOwner, chain_id: `0x${chainId.toString(16)}` }
+      ]);
+
+      if (!record?.passkey_pubkey) {
+        throw new Error("No passkey stored for this account.");
+      }
+      setPasskeyHex(record.passkey_pubkey);
+      setPasskeyNotice("Loaded.");
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorText(message);
+      setPasskeyNotice("");
     }
   };
 
@@ -184,13 +262,40 @@ function App() {
 
   const handlePrepareDeploy = async (): Promise<void> => {
     setErrorText("");
-    if (!owner) {
-      setErrorText("Owner address is required.");
-      return;
+    setSettingsNotice("");
+    let effectiveOwner = owner;
+    if (!effectiveOwner) {
+      effectiveOwner = (await getWalletAccount(true)) ?? "";
+      if (!effectiveOwner) {
+        setErrorText("Owner address is required.");
+        return;
+      }
+      setOwner(effectiveOwner);
     }
     if (!passkeyHex) {
-      setErrorText("Passkey pubkey(hex) is required.");
-      return;
+      const chainId = chainConfig?.chain_id ?? runtimeChainId;
+      if (!chainId) {
+        setErrorText("Chain ID is required to load passkey.");
+        return;
+      }
+      try {
+        setPasskeyNotice("Loading saved passkey...");
+        const record = await callRpc<PasskeyRecord | null>("mesh_getPasskey", [
+          { owner: effectiveOwner, chain_id: `0x${chainId.toString(16)}` }
+        ]);
+        if (record?.passkey_pubkey) {
+          setPasskeyHex(record.passkey_pubkey);
+          setPasskeyNotice("Loaded.");
+        } else {
+          setPasskeyNotice("");
+          setErrorText("Passkey pubkey(hex) is required.");
+          return;
+        }
+      } catch (error) {
+        setPasskeyNotice("");
+        setErrorText((error as Error).message || "Passkey pubkey(hex) is required.");
+        return;
+      }
     }
 
     setLoading(true);
@@ -199,15 +304,15 @@ function App() {
 
     try {
       const params: Record<string, string> = {
-        owner,
-        from: owner,
+        owner: effectiveOwner,
+        from: effectiveOwner,
         passkey_pubkey: passkeyHex
       };
       if (factory) params.factory = factory;
-      if (salt) params.salt = salt;
 
       const prepared = await callRpc<PrepareDeployResult>("mesh_prepareDeploy", [params]);
       if (prepared.predicted_address) setPredictedAddress(prepared.predicted_address);
+      setPasskeyHex("");
       appendLog("mesh_prepareDeploy success");
 
       if (!window.ethereum) {
@@ -238,6 +343,7 @@ function App() {
 
   const handleConfirmDeploy = async (): Promise<void> => {
     setErrorText("");
+    setSettingsNotice("");
     if (!txHash) {
       setErrorText("tx hash is required for confirm.");
       return;
@@ -255,12 +361,78 @@ function App() {
     }
   };
 
+  const handleConnectWallet = async (): Promise<void> => {
+    setErrorText("");
+    setSettingsNotice("");
+    setPasskeyNotice("");
+    try {
+      const account = await getWalletAccount(true);
+      if (!account) {
+        throw new Error("Wallet connection cancelled.");
+      }
+      setOwner(account);
+      appendLog(`Wallet connected: ${account}`);
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorText(message);
+    }
+  };
+
+  const handleSaveChainConfig = async (): Promise<void> => {
+    setErrorText("");
+    setSettingsNotice("");
+    const rawChainId = settingsChainId.trim();
+    let chainIdHex = "";
+    if (rawChainId) {
+      if (rawChainId.startsWith("0x")) {
+        chainIdHex = rawChainId;
+      } else if (/^\d+$/.test(rawChainId)) {
+        chainIdHex = `0x${BigInt(rawChainId).toString(16)}`;
+      }
+    }
+
+    const fallbackChainId = chainConfig?.chain_id ?? runtimeChainId;
+    if (!chainIdHex && !fallbackChainId) {
+      setErrorText("Chain ID is required to save config.");
+      return;
+    }
+    if (!chainIdHex && fallbackChainId) {
+      chainIdHex = `0x${fallbackChainId.toString(16)}`;
+    }
+    if (!rpcUrl.trim()) {
+      setErrorText("RPC URL is required to save config.");
+      return;
+    }
+
+    const params: Record<string, string> = {
+      chain_id: chainIdHex,
+      mode: chainConfig?.mode ?? "SCA",
+      status: chainConfig?.status ?? "inactive"
+    };
+
+    if (chainConfig?.sca_address) params.sca_address = chainConfig.sca_address;
+    else if (predictedAddress) params.sca_address = predictedAddress;
+    params.rpc_url = rpcUrl.trim();
+
+    try {
+      await callRpc<boolean>("mesh_setChainConfig", [params]);
+      setSettingsNotice("Saved.");
+      appendLog("mesh_setChainConfig updated");
+      await refreshChainConfig();
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorText(message);
+      setSettingsNotice("");
+      appendLog(`mesh_setChainConfig failed: ${message}`);
+    }
+  };
+
   const renderDashboard = (): JSX.Element => (
     <>
       <section className="row two-col">
         <article className="card grow">
-          <h2>Chain Status</h2>
-          <p>Chain: {chainConfig ? chainConfig.chain_id : "-"}</p>
+          <h2>Chain</h2>
+          <p>Chain: {chainConfig?.chain_id ?? runtimeChainId ?? "-"}</p>
           <p>Mode: {chainConfig?.mode ?? "SCA"}</p>
           <p className={chainConfig?.status === "active" ? "success" : "danger"}>
             Status: {chainConfig?.status ?? "inactive"}
@@ -268,33 +440,8 @@ function App() {
         </article>
 
         <article className="card quick-actions">
-          <h2>Quick Actions</h2>
-          <div className="input-grid">
-            <label>
-              Owner (EOA)
-              <input value={owner} onChange={(e) => setOwner(e.target.value.trim())} />
-            </label>
-            <label>
-              Passkey Pubkey (hex)
-              <input value={passkeyHex} onChange={(e) => setPasskeyHex(e.target.value.trim())} />
-            </label>
-            <label>
-              Factory (optional)
-              <input value={factory} onChange={(e) => setFactory(e.target.value.trim())} />
-            </label>
-            <label>
-              Salt (optional bytes32)
-              <input value={salt} onChange={(e) => setSalt(e.target.value.trim())} />
-            </label>
-            <label>
-              Tx Hash (confirm)
-              <input value={txHash} onChange={(e) => setTxHash(e.target.value.trim())} />
-            </label>
-          </div>
+          <h2>Actions</h2>
           <div className="button-row">
-            <button className="btn btn-soft" type="button" onClick={handleUseWallet} disabled={loading}>
-              Use Wallet
-            </button>
             <button className="btn btn-dark" type="button" onClick={handlePrepareDeploy} disabled={loading}>
               Prepare Deploy
             </button>
@@ -306,114 +453,96 @@ function App() {
         </article>
       </section>
 
-      <section className="row two-col">
+      <section className="row">
         <article className="card grow">
-          <h2>Recent Requests</h2>
-          {logLines.length === 0 ? <p>No requests yet.</p> : null}
-          {logLines.slice(0, 8).map((line) => (
+          <h2>Activity</h2>
+          {logLines.length === 0 ? <p>No recent events.</p> : null}
+          {logLines.slice(0, 4).map((line) => (
             <p key={line}>{line}</p>
           ))}
-        </article>
-
-        <article className="card side">
-          <h2>Identity</h2>
-          <p>EOA: {shorten(owner) || "-"}</p>
-          <p>SCA: {shorten(chainConfig?.sca_address || predictedAddress)}</p>
-          <p className="amber">Mode: {chainConfig?.mode ?? "SCA"} (predicted)</p>
-        </article>
-      </section>
-
-      <section className="row two-col">
-        <article className="card grow">
-          <h2>Passkey</h2>
-          <p className={passkeyHex ? "success" : "danger"}>
-            Status: {passkeyHex ? "configured" : "not configured"}
-          </p>
-          <p>Device: browser passkey</p>
-        </article>
-
-        <article className="card side">
-          <h2>System Health</h2>
-          <p className="success">Relayer: Online</p>
-          <p className={serialStatus === "not-configured" ? "danger" : "success"}>
-            Node B: {serialStatus}
-          </p>
-          <p className={serialStatus === "not-configured" ? "danger" : "success"}>
-            ESP-NOW: {serialStatus === "not-configured" ? "Unknown" : "Ready"}
-          </p>
         </article>
       </section>
     </>
   );
 
-  const renderChains = (): JSX.Element => (
-    <section className="section-grid">
-      <article className="card">
-        <h2>Chain Registry</h2>
-        <p>chain_id: {chainConfig?.chain_id ?? runtimeChainId ?? "-"}</p>
-        <p>mode: {chainConfig?.mode ?? "-"}</p>
-        <p>status: {chainConfig?.status ?? "-"}</p>
-        <p>factory: {chainConfig?.factory_address ?? (factory || "-")}</p>
-        <p>sca: {chainConfig?.sca_address ?? (predictedAddress || "-")}</p>
-        <div className="button-row">
-          <button className="btn btn-soft" type="button" onClick={() => void refreshChainConfig()}>
-            Refresh Chain Config
-          </button>
-        </div>
-      </article>
-
-      <article className="card">
-        <h2>Deploy Tracking</h2>
-        <p>last tx hash: {txHash || "-"}</p>
-        <p>predicted sca: {predictedAddress || "-"}</p>
-        <p className={isActive ? "success" : isError ? "danger" : "amber"}>
-          deploy state: {effectiveViewState}
-        </p>
-      </article>
-    </section>
-  );
-
-  const renderPasskeys = (): JSX.Element => (
-    <section className="section-grid">
-      <article className="card">
-        <h2>Passkey Config</h2>
-        <p>Store the registration public key in hex format.</p>
+  const renderSettings = (): JSX.Element => (
+    <section className="row two-col">
+      <article className="card grow">
+        <h2>RPC Profile</h2>
+        <p className="muted">Target chain, RPC URL, and factory.</p>
         <div className="input-grid">
           <label>
-            Passkey Public Key (hex)
-            <input value={passkeyHex} onChange={(e) => setPasskeyHex(e.target.value.trim())} />
+            Chain ID
+            <input
+              value={settingsChainId}
+              onChange={(e) => setSettingsChainId(e.target.value.trim())}
+              placeholder="11155111"
+            />
+          </label>
+          <label>
+            RPC URL
+            <input
+              value={rpcUrl}
+              onChange={(e) => setRpcUrl(e.target.value.trim())}
+              placeholder="https://..."
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            Factory Address
+            <input value={factory} readOnly />
           </label>
         </div>
         <div className="button-row">
-          <button className="btn btn-soft" type="button" onClick={() => appendLog("Passkey value updated")}>
-            Save Local Value
+          <button className="btn btn-soft" type="button" onClick={() => void refreshChainConfig()}>
+            Refresh
+          </button>
+          <button className="btn btn-dark" type="button" onClick={handleSaveChainConfig} disabled={loading}>
+            Save RPC Profile
           </button>
         </div>
-        <p className={passkeyHex ? "success" : "danger"}>
-          current status: {passkeyHex ? "configured" : "not configured"}
-        </p>
+        {errorText ? <p className="danger">{errorText}</p> : null}
+        {settingsNotice ? <p className="success">{settingsNotice}</p> : null}
       </article>
-    </section>
-  );
 
-  const renderLogs = (): JSX.Element => (
-    <section className="section-grid">
-      <article className="card">
-        <h2>Relayer Logs</h2>
+      <article className="card side">
+        <h2>Security</h2>
+        <p className="muted">Passkey registration</p>
+        <p>Owner: {shorten(owner)}</p>
+        <div className="input-grid">
+          <label>
+            Passkey (hex)
+            <input
+              value={passkeyHex}
+              onChange={(e) => setPasskeyHex(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="04..."
+            />
+          </label>
+        </div>
         <div className="button-row">
-          <button className="btn btn-soft" type="button" onClick={() => void refreshSerialStatus()}>
-            Refresh Serial Status
+          <button className="btn btn-soft" type="button" onClick={handleConnectWallet} disabled={loading}>
+            Connect Wallet
           </button>
-          <button className="btn btn-soft" type="button" onClick={() => setLogLines([])}>
-            Clear Logs
+          <button className="btn btn-dark" type="button" onClick={handleRegisterPasskey} disabled={loading}>
+            Register Passkey
+          </button>
+          <button className="btn btn-soft" type="button" onClick={handleLoadPasskey} disabled={loading}>
+            Load Saved
           </button>
         </div>
-        <div className="log-list">
-          {logLines.length === 0 ? <p>No logs yet.</p> : null}
-          {logLines.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-        </div>
+        {errorText ? <p className="danger">{errorText}</p> : null}
+        {passkeyNotice ? (
+          <p className={passkeyNotice.toLowerCase().includes("load") ? "amber" : "success"}>
+            {passkeyNotice.toLowerCase().includes("load") ? (
+              <span className="spinner" aria-hidden>
+                <span />
+              </span>
+            ) : null}
+            {passkeyNotice}
+          </p>
+        ) : null}
       </article>
     </section>
   );
@@ -432,14 +561,8 @@ function App() {
             <button className={`menu-item ${activeTab === "dashboard" ? "active" : ""}`} onClick={() => setTab("dashboard")} type="button">
               Dashboard
             </button>
-            <button className={`menu-item ${activeTab === "chains" ? "active" : ""}`} onClick={() => setTab("chains")} type="button">
-              Chains
-            </button>
-            <button className={`menu-item ${activeTab === "passkeys" ? "active" : ""}`} onClick={() => setTab("passkeys")} type="button">
-              Passkeys
-            </button>
-            <button className={`menu-item ${activeTab === "logs" ? "active" : ""}`} onClick={() => setTab("logs")} type="button">
-              Logs
+            <button className={`menu-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")} type="button">
+              Settings
             </button>
           </nav>
 
@@ -450,7 +573,7 @@ function App() {
 
         <main className="main">
           <header className="header">
-            <h1>Relayer Dashboard</h1>
+            <h1>{activeTab === "settings" ? "Settings" : "Relayer Dashboard"}</h1>
             <div className="header-right">
               <span className="mode-pill">Local Mode</span>
               <span className="chain-meta">
@@ -464,28 +587,7 @@ function App() {
           </header>
 
           {activeTab === "dashboard" ? renderDashboard() : null}
-          {activeTab === "chains" ? renderChains() : null}
-          {activeTab === "passkeys" ? renderPasskeys() : null}
-          {activeTab === "logs" ? renderLogs() : null}
-
-          <section className="card network">
-            <h2>Network Activity</h2>
-            <p className="muted">Recent approval/transport events</p>
-            <div className="table-head">
-              <span>Source</span>
-              <span>Type</span>
-              <span>Result</span>
-              <span>Time</span>
-            </div>
-            <div className="table-row">
-              <span>Relayer</span>
-              <span>mesh_prepareDeploy</span>
-              <span className={loading ? "amber" : isActive ? "success" : isError ? "danger" : "muted"}>
-                {loading ? "Pending" : isActive ? "Active" : isError ? "Error" : "Idle"}
-              </span>
-              <span className="muted">{new Date().toLocaleTimeString()}</span>
-            </div>
-          </section>
+          {activeTab === "settings" ? renderSettings() : null}
         </main>
 
         <div className={`status-layer ${isPending || isActive || isError ? "visible" : ""}`}>
