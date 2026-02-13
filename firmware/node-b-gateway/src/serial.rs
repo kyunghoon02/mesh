@@ -1,7 +1,7 @@
 ﻿use embedded_io::{ErrorKind, Read, Write};
 
-// Simple length-prefixed framing over UART/Serial.
-// Frame format: [len_lo, len_hi, payload...]
+// UART/Serial용 길이 프레임 포맷
+// Frame: [len_lo, len_hi, payload...]
 
 pub struct SerialManager<U> {
     uart: U,
@@ -32,10 +32,12 @@ where
         }
     }
 
-    /// Non-blocking frame reader. Returns Ok(Some(len)) when a full frame is ready.
+    /// 논블로킹 프레임 리더
+    /// - 완전한 프레임 수신 시 Ok(Some(len)) 반환
+    /// - 아직 미완이면 Ok(None) 반환
     pub fn poll_read_frame(&mut self, buf: &mut [u8]) -> Result<Option<usize>, SerialError> {
         if self.payload_len.is_none() {
-            // Read length prefix
+            // 길이 프리픽스 읽기
             let n = self.read_nonblocking(&mut self.len_buf[self.len_read..])?;
             self.len_read += n;
             if self.len_read < 2 {
