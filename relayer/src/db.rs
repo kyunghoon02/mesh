@@ -20,10 +20,12 @@ pub async fn init_db(url: &str) -> Option<Arc<PgClient>> {
                 sca_address TEXT,
                 factory_address TEXT,
                 rpc_url TEXT,
+                supports_passkey BOOLEAN NOT NULL DEFAULT FALSE,
                 status TEXT NOT NULL DEFAULT 'inactive',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            ALTER TABLE chain_registry ADD COLUMN IF NOT EXISTS rpc_url TEXT;",
+            ALTER TABLE chain_registry ADD COLUMN IF NOT EXISTS rpc_url TEXT;
+            ALTER TABLE chain_registry ADD COLUMN IF NOT EXISTS supports_passkey BOOLEAN NOT NULL DEFAULT FALSE;",
         )
         .await
     {
@@ -55,7 +57,7 @@ pub async fn init_db(url: &str) -> Option<Arc<PgClient>> {
 pub async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Value>, String> {
     let row = db
         .query_opt(
-            "SELECT chain_id, mode, sca_address, factory_address, rpc_url, status, updated_at \
+            "SELECT chain_id, mode, sca_address, factory_address, rpc_url, supports_passkey, status, updated_at \
              FROM chain_registry WHERE chain_id = $1",
             &[&(chain_id as i64)],
         )
@@ -73,8 +75,9 @@ pub async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Val
         "sca_address": row.get::<_, Option<String>>(2),
         "factory_address": row.get::<_, Option<String>>(3),
         "rpc_url": row.get::<_, Option<String>>(4),
-        "status": row.get::<_, String>(5),
-        "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(6).to_rfc3339(),
+        "supports_passkey": row.get::<_, bool>(5),
+        "status": row.get::<_, String>(6),
+        "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(7).to_rfc3339(),
     })))
 }
 
@@ -85,16 +88,18 @@ pub async fn upsert_chain_config(
     sca_address: Option<String>,
     factory_address: Option<String>,
     rpc_url: Option<String>,
+    supports_passkey: bool,
     status: String,
 ) -> Result<(), String> {
     db.execute(
-        "INSERT INTO chain_registry (chain_id, mode, sca_address, factory_address, rpc_url, status) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
+        "INSERT INTO chain_registry (chain_id, mode, sca_address, factory_address, rpc_url, supports_passkey, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (chain_id) DO UPDATE SET \
            mode = EXCLUDED.mode, \
            sca_address = COALESCE(EXCLUDED.sca_address, chain_registry.sca_address), \
            factory_address = COALESCE(EXCLUDED.factory_address, chain_registry.factory_address), \
            rpc_url = COALESCE(EXCLUDED.rpc_url, chain_registry.rpc_url), \
+           supports_passkey = EXCLUDED.supports_passkey, \
            status = EXCLUDED.status, \
            updated_at = NOW()",
         &[
@@ -103,6 +108,7 @@ pub async fn upsert_chain_config(
             &sca_address,
             &factory_address,
             &rpc_url,
+            &supports_passkey,
             &status,
         ],
     )

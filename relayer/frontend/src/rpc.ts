@@ -58,6 +58,7 @@ export type ChainConfig = {
   sca_address: string | null;
   factory_address: string | null;
   rpc_url: string | null;
+  supports_passkey: boolean;
   status: string;
   updated_at: string;
 };

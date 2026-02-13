@@ -210,12 +210,17 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(parse_bytes32);
 
     let mut factory = None;
+    let mut supports_passkey = false;
     if let (Some(db), Some(chain_id)) = (&state.db, chain_opt) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
             factory = cfg
                 .get("factory_address")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            supports_passkey = cfg
+                .get("supports_passkey")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
         }
     }
     if factory.is_none() {
@@ -233,15 +238,20 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    let passkey = match passkey {
-        Some(v) => v,
-        None => {
-            return json!({
-                "jsonrpc":"2.0",
-                "id": id,
-                "error": {"code": -32602, "message": "invalid passkey_pubkey"}
-            })
+    let passkey = if supports_passkey {
+        match passkey {
+            Some(v) => v,
+            None => {
+                return json!({
+                    "jsonrpc":"2.0",
+                    "id": id,
+                    "error": {"code": -32602, "message": "invalid passkey_pubkey"}
+                })
+            }
         }
+    } else {
+        // Passkey 미지원 체인은 빈 pubkey 허용
+        passkey.unwrap_or_default()
     };
 
     let factory = match factory {
@@ -294,6 +304,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
             predicted.clone(),
             Some(factory.clone()),
             None,
+            supports_passkey,
             "pending".to_string(),
         )
         .await;
@@ -398,6 +409,10 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let supports_passkey = first
+        .and_then(|m| m.get("supports_passkey").or_else(|| m.get("supportsPasskey")))
+        .and_then(|v| v.as_bool());
+
     let status = first
         .and_then(|m| m.get("status"))
         .and_then(|v| v.as_str())
@@ -442,7 +457,20 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         }
     }
 
-    match upsert_chain_config(db, chain_id, mode, sca_address, factory_address, rpc_url, status).await {
+    let supports_passkey = supports_passkey.unwrap_or(false);
+
+    match upsert_chain_config(
+        db,
+        chain_id,
+        mode,
+        sca_address,
+        factory_address,
+        rpc_url,
+        supports_passkey,
+        status,
+    )
+    .await
+    {
         Ok(_) => json!({
             "jsonrpc":"2.0",
             "id": id,
@@ -531,6 +559,20 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
             })
         }
     };
+
+    if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+        let supports = cfg
+            .get("supports_passkey")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !supports {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "passkey not supported on this chain"}
+            });
+        }
+    }
 
     match upsert_passkey(db, &owner, chain_id, &passkey_hex, credential_id, rp_id).await {
         Ok(_) => json!({
@@ -673,6 +715,13 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
 
     if status != "pending" {
         if let Some(db) = &state.db {
+            let mut supports_passkey = false;
+            if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+                supports_passkey = cfg
+                    .get("supports_passkey")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+            }
             let _ = upsert_chain_config(
                 db,
                 chain_id,
@@ -680,6 +729,7 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 sca_address,
                 factory_address,
                 None,
+                supports_passkey,
                 status.to_string(),
             )
             .await;

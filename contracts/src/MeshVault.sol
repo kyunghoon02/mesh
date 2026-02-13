@@ -1,17 +1,7 @@
 ﻿// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Passkey(WebAuthn) 서명 검증 인터페이스
-/// @dev 실제 검증 로직은 외부 Verifier 컨트랙트에서 처리
-interface IPasskeyVerifier {
-    function verify(
-        bytes calldata authenticatorData,
-        bytes calldata clientDataJSON,
-        bytes calldata signature,
-        bytes calldata pubkey,
-        bytes32 expectedChallenge
-    ) external view returns (bool);
-}
+import {IPasskeyVerifier} from "./interfaces/IPasskeyVerifier.sol";
 
 /// @title MeshVault - 최소 구현 SCA
 /// @notice EOA(하드웨어) 소유자 + Passkey(P-256) 공개키 보관 + ERC-1271 검증

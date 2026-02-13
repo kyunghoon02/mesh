@@ -73,6 +73,7 @@ function App() {
   const [txHash, setTxHash] = useState("");
   const [runtimeChainId, setRuntimeChainId] = useState<number | null>(null);
   const [settingsChainId, setSettingsChainId] = useState("");
+  const [supportsPasskey, setSupportsPasskey] = useState(false);
 
   const [chainConfig, setChainConfig] = useState<ChainConfig | null>(null);
   const [predictedAddress, setPredictedAddress] = useState<string>("");
@@ -114,6 +115,7 @@ function App() {
       if (result) {
         setRuntimeChainId(result.chain_id);
         setViewState(statusToView(result.status));
+        setSupportsPasskey(result.supports_passkey ?? false);
         if (!factory && result.factory_address) setFactory(result.factory_address);
         if (!rpcUrl && result.rpc_url) setRpcUrl(result.rpc_url);
         if (result.sca_address) setPredictedAddress(result.sca_address);
@@ -151,6 +153,10 @@ function App() {
     setErrorText("");
     setSettingsNotice("");
     setPasskeyNotice("");
+    if (!supportsPasskey) {
+      setErrorText("Passkey is not supported on this chain.");
+      return;
+    }
     setLoading(true);
     try {
       let effectiveOwner = owner;
@@ -198,6 +204,10 @@ function App() {
     setErrorText("");
     setSettingsNotice("");
     setPasskeyNotice("");
+    if (!supportsPasskey) {
+      setErrorText("Passkey is not supported on this chain.");
+      return;
+    }
     try {
       let effectiveOwner = owner;
       if (!effectiveOwner) {
@@ -272,7 +282,7 @@ function App() {
       }
       setOwner(effectiveOwner);
     }
-    if (!passkeyHex) {
+    if (supportsPasskey && !passkeyHex) {
       const chainId = chainConfig?.chain_id ?? runtimeChainId;
       if (!chainId) {
         setErrorText("Chain ID is required to load passkey.");
@@ -303,12 +313,14 @@ function App() {
     appendLog("mesh_prepareDeploy request");
 
     try {
-      const params: Record<string, string> = {
-        owner: effectiveOwner,
-        from: effectiveOwner,
-        passkey_pubkey: passkeyHex
-      };
-      if (factory) params.factory = factory;
+    const params: Record<string, string> = {
+      owner: effectiveOwner,
+      from: effectiveOwner
+    };
+    if (supportsPasskey && passkeyHex) {
+      params.passkey_pubkey = passkeyHex;
+    }
+    if (factory) params.factory = factory;
 
       const prepared = await callRpc<PrepareDeployResult>("mesh_prepareDeploy", [params]);
       if (prepared.predicted_address) setPredictedAddress(prepared.predicted_address);
@@ -404,10 +416,11 @@ function App() {
       return;
     }
 
-    const params: Record<string, string> = {
+    const params: Record<string, string | boolean> = {
       chain_id: chainIdHex,
       mode: chainConfig?.mode ?? "SCA",
-      status: chainConfig?.status ?? "inactive"
+      status: chainConfig?.status ?? "inactive",
+      supports_passkey: supportsPasskey
     };
 
     if (chainConfig?.sca_address) params.sca_address = chainConfig.sca_address;
@@ -434,6 +447,7 @@ function App() {
           <h2>Chain</h2>
           <p>Chain: {chainConfig?.chain_id ?? runtimeChainId ?? "-"}</p>
           <p>Mode: {chainConfig?.mode ?? "SCA"}</p>
+          <p>Passkey: {chainConfig?.supports_passkey ? "Supported" : "EOA only"}</p>
           <p className={chainConfig?.status === "active" ? "success" : "danger"}>
             Status: {chainConfig?.status ?? "inactive"}
           </p>
@@ -489,6 +503,14 @@ function App() {
             />
           </label>
           <label>
+            Supports Passkey
+            <input
+              type="checkbox"
+              checked={supportsPasskey}
+              onChange={(e) => setSupportsPasskey(e.target.checked)}
+            />
+          </label>
+          <label>
             Factory Address
             <input value={factory} readOnly />
           </label>
@@ -508,6 +530,7 @@ function App() {
       <article className="card side">
         <h2>Security</h2>
         <p className="muted">Passkey registration</p>
+        {!supportsPasskey ? <p className="amber">This chain does not support passkey recovery. EOA only.</p> : null}
         <p>Owner: {shorten(owner)}</p>
         <div className="input-grid">
           <label>
@@ -518,6 +541,7 @@ function App() {
               autoComplete="off"
               spellCheck={false}
               placeholder="04..."
+              disabled={!supportsPasskey || loading}
             />
           </label>
         </div>
@@ -525,10 +549,20 @@ function App() {
           <button className="btn btn-soft" type="button" onClick={handleConnectWallet} disabled={loading}>
             Connect Wallet
           </button>
-          <button className="btn btn-dark" type="button" onClick={handleRegisterPasskey} disabled={loading}>
+          <button
+            className="btn btn-dark"
+            type="button"
+            onClick={handleRegisterPasskey}
+            disabled={!supportsPasskey || loading}
+          >
             Register Passkey
           </button>
-          <button className="btn btn-soft" type="button" onClick={handleLoadPasskey} disabled={loading}>
+          <button
+            className="btn btn-soft"
+            type="button"
+            onClick={handleLoadPasskey}
+            disabled={!supportsPasskey || loading}
+          >
             Load Saved
           </button>
         </div>
