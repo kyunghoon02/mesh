@@ -210,6 +210,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(parse_bytes32);
 
     let mut factory = None;
+    // 체인별 패스키 지원 여부(미지원 체인은 EOA 복구만)
     let mut supports_passkey = false;
     if let (Some(db), Some(chain_id)) = (&state.db, chain_opt) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
@@ -238,6 +239,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
+    // 패스키 지원 체인에서는 passkey_pubkey 필수, 미지원 체인은 빈 값 허용
     let passkey = if supports_passkey {
         match passkey {
             Some(v) => v,
@@ -409,6 +411,7 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // UI에서 저장한 체인별 패스키 지원 플래그
     let supports_passkey = first
         .and_then(|m| m.get("supports_passkey").or_else(|| m.get("supportsPasskey")))
         .and_then(|v| v.as_bool());
@@ -560,6 +563,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
         }
     };
 
+    // 미지원 체인은 Passkey 등록/갱신 금지
     if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
         let supports = cfg
             .get("supports_passkey")

@@ -20,6 +20,7 @@ pub async fn init_db(url: &str) -> Option<Arc<PgClient>> {
                 sca_address TEXT,
                 factory_address TEXT,
                 rpc_url TEXT,
+                -- 패스키(P-256) 온체인 검증 지원 여부
                 supports_passkey BOOLEAN NOT NULL DEFAULT FALSE,
                 status TEXT NOT NULL DEFAULT 'inactive',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -75,6 +76,7 @@ pub async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Val
         "sca_address": row.get::<_, Option<String>>(2),
         "factory_address": row.get::<_, Option<String>>(3),
         "rpc_url": row.get::<_, Option<String>>(4),
+        // 패스키 지원 체인에서만 Passkey 복구 허용
         "supports_passkey": row.get::<_, bool>(5),
         "status": row.get::<_, String>(6),
         "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(7).to_rfc3339(),
