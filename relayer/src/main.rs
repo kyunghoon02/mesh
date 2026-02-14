@@ -1,10 +1,10 @@
+use axum::{Router, routing::post};
+use reqwest::Client;
+use sha3::{Digest, Keccak256};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64},
 };
-
-use axum::{Router, routing::post};
-use reqwest::Client;
 use tokio_postgres::Client as PgClient;
 use tracing::{info, warn};
 
@@ -28,6 +28,7 @@ pub struct AppState {
     pub serial: Option<SerialClient>,
     pub seq: Arc<AtomicU32>,
     pub counter: Arc<AtomicU64>,
+    pub aead_key: [u8; 32],
     pub client: Client,
 }
 
@@ -50,23 +51,78 @@ impl ApprovalMode {
     }
 }
 
+fn parse_aead_key_from_env_or_eoa() -> [u8; 32] {
+    let raw = match std::env::var("MESH_AEAD_KEY") {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("MESH_AEAD_KEY가 설정되지 않았습니다. EOA_ADDRESS 기반으로 키를 파생합니다.");
+            return derive_aead_key_from_eoa();
+        }
+    };
+
+    let mut key_hex = raw.trim().to_ascii_lowercase();
+    if let Some(v) = key_hex.strip_prefix("0x") {
+        key_hex = v.to_string();
+    }
+
+    let decoded = match hex::decode(&key_hex) {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("MESH_AEAD_KEY 형식이 유효하지 않습니다. EOA_ADDRESS 기반으로 키를 파생합니다.");
+            return derive_aead_key_from_eoa();
+        }
+    };
+
+    if decoded.len() != 32 {
+        warn!(
+            "MESH_AEAD_KEY 길이가 잘못되었습니다. 현재 {}바이트, EOA_ADDRESS 기반 키로 대체합니다.",
+            decoded.len()
+        );
+        return derive_aead_key_from_eoa();
+    }
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&decoded);
+    key
+}
+
+fn derive_aead_key_from_eoa() -> [u8; 32] {
+    let eoa = match std::env::var("EOA_ADDRESS").ok() {
+        Some(v) => v,
+        None => {
+            warn!("EOA_ADDRESS도 설정되지 않아 기본 키(0x00)를 사용합니다.");
+            return [0u8; 32];
+        }
+    };
+
+    let addr = match crate::abi::parse_address(&eoa) {
+        Some(a) => a,
+        None => {
+            warn!("EOA_ADDRESS 형식이 잘못되어 기본 키(0x00)를 사용합니다.");
+            return [0u8; 32];
+        }
+    };
+
+    let mut hasher = Keccak256::new();
+    hasher.update(addr);
+    let hash = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&hash);
+    key
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
-
-    // .env 파일이 있으면 로드
     dotenvy::dotenv().ok();
 
-    // 필수: 업스트림 RPC
     let upstream = std::env::var("UPSTREAM_RPC").unwrap_or_default();
     let eoa_address = std::env::var("EOA_ADDRESS").unwrap_or_default();
     let sca_address = std::env::var("SCA_ADDRESS").unwrap_or_default();
     let factory_address = std::env::var("FACTORY_ADDRESS").ok();
     let db_url = std::env::var("DATABASE_URL").ok();
-    // 선택: 바인딩 주소
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-    // 선택: Node B Serial 연결
     let serial_port = std::env::var("SERIAL_PORT").ok();
     let serial_baud: u32 = std::env::var("SERIAL_BAUD")
         .ok()
@@ -110,6 +166,7 @@ async fn main() {
         Some(url) => db::init_db(&url).await,
         None => None,
     };
+    let aead_key = parse_aead_key_from_env_or_eoa();
 
     let state = Arc::new(AppState {
         upstream,
@@ -122,6 +179,7 @@ async fn main() {
         serial,
         seq: Arc::new(AtomicU32::new(1)),
         counter: Arc::new(AtomicU64::new(1)),
+        aead_key,
         client,
     });
 

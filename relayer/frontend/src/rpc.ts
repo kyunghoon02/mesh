@@ -69,11 +69,41 @@ export type PrepareDeployResult = {
   predicted_address?: string;
 };
 
+export type SetPasskeyResult = {
+  stored: boolean;
+  warning?: string;
+  tx?: Record<string, string>;
+  request?: {
+    method: string;
+    params: Array<unknown>;
+    jsonrpc: "2.0";
+    id: number;
+  };
+};
+
+export type RpcRequest = {
+  method: string;
+  params: Array<unknown>;
+  jsonrpc: "2.0";
+  id: number;
+};
+
+export type PrepareRecoverResult = {
+  tx: Record<string, string>;
+  request: {
+    method: string;
+    params: Array<unknown>;
+    jsonrpc: "2.0";
+    id: number;
+  };
+};
+
 export type ConfirmDeployResult = {
   chain_id: number;
   status: "active" | "failed" | "pending";
   sca_address?: string | null;
   factory_address?: string | null;
+  setpasskey_request?: RpcRequest;
 };
 
 export type PasskeyRecord = {

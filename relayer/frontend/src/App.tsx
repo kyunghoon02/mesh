@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { callRpc, type ChainConfig, type ConfirmDeployResult, type PasskeyRecord, type PrepareDeployResult } from "./rpc";
-import { registerPasskey } from "./webauthn";
+import {
+  callRpc,
+  type ChainConfig,
+  type ConfirmDeployResult,
+  type PasskeyRecord,
+  type PrepareDeployResult,
+  type PrepareRecoverResult,
+  type SetPasskeyResult
+} from "./rpc";
+import { makeRecoveryChallenge, registerPasskey, signWithPasskey } from "./webauthn";
 
 type ViewState = "idle" | "pending" | "active" | "confirm" | "error";
 type SidebarTab = "dashboard" | "settings";
@@ -74,6 +82,10 @@ function App() {
   const [runtimeChainId, setRuntimeChainId] = useState<number | null>(null);
   const [settingsChainId, setSettingsChainId] = useState("");
   const [supportsPasskey, setSupportsPasskey] = useState(false);
+  const [newOwner, setNewOwner] = useState("");
+  const [recoveryAuthData, setRecoveryAuthData] = useState("");
+  const [recoveryClientData, setRecoveryClientData] = useState("");
+  const [recoverySignature, setRecoverySignature] = useState("");
 
   const [chainConfig, setChainConfig] = useState<ChainConfig | null>(null);
   const [predictedAddress, setPredictedAddress] = useState<string>("");
@@ -179,15 +191,42 @@ function App() {
         displayName: effectiveOwner || "mesh-user"
       });
       setPasskeyHex(result.publicKeyHex);
-      await callRpc<boolean>("mesh_setPasskey", [
+
+      const chainHex = `0x${chainId.toString(16)}`;
+      const setPasskeyResult = await callRpc<SetPasskeyResult>("mesh_setPasskey", [
         {
           owner: effectiveOwner,
-          chain_id: `0x${chainId.toString(16)}`,
+          chain_id: chainHex,
           passkey_pubkey: result.publicKeyHex,
           credential_id: result.credentialId,
-          rp_id: result.rpId
+          rp_id: result.rpId,
+          from: effectiveOwner
         }
       ]);
+
+      if (setPasskeyResult.warning) {
+        appendLog(`passkey warning: ${setPasskeyResult.warning}`);
+      }
+
+      if (setPasskeyResult.request && setPasskeyResult.request.params?.length) {
+        if (!window.ethereum) {
+          appendLog("MetaMask not connected. Please submit the on-chain passkey tx manually in your wallet.");
+        } else {
+          try {
+            await window.ethereum.request({
+              method: setPasskeyResult.request.method,
+              params: setPasskeyResult.request.params as unknown[]
+            });
+            appendLog("passkey on-chain set tx submitted");
+          } catch (error) {
+            const message = (error as Error).message;
+            appendLog(`mesh_setPasskey tx submission failed: ${message}`);
+          }
+        }
+      } else {
+        appendLog("Passkey saved. On-chain update is available after SCA becomes active.");
+      }
+
       setPasskeyNotice("Saved.");
       appendLog("passkey registered");
     } catch (error) {
@@ -251,7 +290,8 @@ function App() {
           chain_id: chainId ? `0x${chainId.toString(16)}` : undefined,
           tx_hash: hash,
           sca_address: scaAddress,
-          factory_address: factoryAddress
+          factory_address: factoryAddress,
+          from: owner || undefined
         }
       ]);
 
@@ -264,6 +304,21 @@ function App() {
       appendLog(`mesh_confirmDeploy status: ${result.status}`);
       if (result.status === "active") {
         setViewState("active");
+        if (result.setpasskey_request && owner) {
+          if (!window.ethereum) {
+            appendLog("SetPasskey tx ready. Connect wallet to submit.");
+          } else {
+            try {
+              await window.ethereum.request({
+                method: result.setpasskey_request.method,
+                params: result.setpasskey_request.params
+              });
+              appendLog("setPasskey tx submitted automatically.");
+            } catch (error) {
+              appendLog(`setPasskey submission failed: ${(error as Error).message}`);
+            }
+          }
+        }
         await refreshChainConfig();
         return;
       }
@@ -354,6 +409,167 @@ function App() {
       setErrorText(message);
       appendLog(`prepareDeploy failed: ${message}`);
       setViewState("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePrepareRecover = async (): Promise<void> => {
+    setErrorText("");
+    setSettingsNotice("");
+
+    if (!supportsPasskey) {
+      setErrorText("Passkey is not supported on this chain.");
+      return;
+    }
+    if (!newOwner) {
+      setErrorText("New owner address is required.");
+      return;
+    }
+    if (!recoveryAuthData || !recoveryClientData || !recoverySignature) {
+      setErrorText("authenticator data, client data, and signature are required.");
+      return;
+    }
+
+    let effectiveOwner = owner;
+    if (!effectiveOwner) {
+      effectiveOwner = (await getWalletAccount(true)) ?? "";
+      if (!effectiveOwner) {
+        setErrorText("Wallet connection required.");
+        return;
+      }
+      setOwner(effectiveOwner);
+    }
+
+    const chainId = chainConfig?.chain_id ?? runtimeChainId;
+    if (!chainId) {
+      setErrorText("Chain ID is required.");
+      return;
+    }
+
+    setLoading(true);
+    appendLog("mesh_prepareRecover request");
+    try {
+      const chainHex = `0x${chainId.toString(16)}`;
+      const prepared = await callRpc<PrepareRecoverResult>("mesh_prepareRecover", [
+        {
+          owner: effectiveOwner,
+          chain_id: chainHex,
+          new_owner: newOwner,
+          authenticator_data: recoveryAuthData,
+          client_data_json: recoveryClientData,
+          signature: recoverySignature,
+          from: effectiveOwner
+        }
+      ]);
+      appendLog("mesh_prepareRecover success");
+
+      if (window.ethereum) {
+        await window.ethereum.request({
+          method: prepared.request.method,
+          params: prepared.request.params
+        });
+        appendLog("recover tx submitted");
+      } else {
+        appendLog("MetaMask not found. Save tx manually.");
+      }
+      setViewState("pending");
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorText(message);
+      setViewState("error");
+      appendLog(`mesh_prepareRecover failed: ${message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePrepareRecoverByPasskey = async (): Promise<void> => {
+    setErrorText("");
+    setSettingsNotice("");
+
+    if (!supportsPasskey) {
+      setErrorText("Passkey is not supported on this chain.");
+      return;
+    }
+    if (!newOwner) {
+      setErrorText("New owner address is required.");
+      return;
+    }
+
+    let effectiveOwner = owner;
+    if (!effectiveOwner) {
+      effectiveOwner = (await getWalletAccount(true)) ?? "";
+      if (!effectiveOwner) {
+        setErrorText("Wallet connection required.");
+        return;
+      }
+      setOwner(effectiveOwner);
+    }
+
+    const chainId = chainConfig?.chain_id ?? runtimeChainId;
+    if (!chainId) {
+      setErrorText("Chain ID is required.");
+      return;
+    }
+
+    const chainHex = `0x${chainId.toString(16)}`;
+    const record = await callRpc<PasskeyRecord | null>("mesh_getPasskey", [
+      { owner: effectiveOwner, chain_id: chainHex }
+    ]);
+    if (!record?.passkey_pubkey) {
+      setErrorText("Passkey is not registered.");
+      return;
+    }
+
+    const challenge = makeRecoveryChallenge({
+      owner: effectiveOwner,
+      newOwner,
+      chainId
+    });
+
+    setLoading(true);
+    appendLog("mesh_prepareRecover request");
+    try {
+      const assertion = await signWithPasskey({
+        challenge,
+        rpId: record.rp_id || (import.meta.env.VITE_RP_ID as string | undefined),
+        credentialId: record.credential_id || undefined,
+        userVerification: "required"
+      });
+
+      setRecoveryAuthData(assertion.authenticatorDataHex);
+      setRecoveryClientData(assertion.clientDataJSONHex);
+      setRecoverySignature(assertion.signatureHex);
+
+      const prepared = await callRpc<PrepareRecoverResult>("mesh_prepareRecover", [
+        {
+          owner: effectiveOwner,
+          chain_id: chainHex,
+          new_owner: newOwner,
+          authenticator_data: assertion.authenticatorDataHex,
+          client_data_json: assertion.clientDataJSONHex,
+          signature: assertion.signatureHex,
+          from: effectiveOwner
+        }
+      ]);
+      appendLog("mesh_prepareRecover success");
+
+      if (window.ethereum) {
+        await window.ethereum.request({
+          method: prepared.request.method,
+          params: prepared.request.params
+        });
+        appendLog("recover tx submitted");
+      } else {
+        appendLog("MetaMask not found. Save tx manually.");
+      }
+      setViewState("pending");
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorText(message);
+      setViewState("error");
+      appendLog(`mesh_prepareRecover failed: ${message}`);
     } finally {
       setLoading(false);
     }
@@ -533,8 +749,8 @@ function App() {
         {settingsNotice ? <p className="success">{settingsNotice}</p> : null}
       </article>
 
-      <article className="card side">
-        <h2>Security</h2>
+        <article className="card side">
+          <h2>Security</h2>
         <p className="muted">Passkey registration</p>
         {!supportsPasskey ? <p className="amber">This chain does not support passkey recovery. EOA only.</p> : null}
         <p>Owner: {shorten(owner)}</p>
@@ -583,6 +799,69 @@ function App() {
             {passkeyNotice}
           </p>
         ) : null}
+
+        <h2>Recovery</h2>
+        <p className="muted">Prepare a recover tx with passkey data (authenticator signature).</p>
+        <div className="input-grid">
+          <label>
+            New owner
+            <input
+              value={newOwner}
+              onChange={(e) => setNewOwner(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="0x..."
+            />
+          </label>
+          <label>
+            authenticatorData (hex)
+            <input
+              value={recoveryAuthData}
+              onChange={(e) => setRecoveryAuthData(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="0x..."
+            />
+          </label>
+          <label>
+            clientDataJSON (hex)
+            <input
+              value={recoveryClientData}
+              onChange={(e) => setRecoveryClientData(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="0x..."
+            />
+          </label>
+          <label>
+            signature (hex)
+            <input
+              value={recoverySignature}
+              onChange={(e) => setRecoverySignature(e.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="0x..."
+            />
+          </label>
+        </div>
+        <div className="button-row">
+          <button
+            className="btn btn-soft"
+            type="button"
+            onClick={handlePrepareRecover}
+            disabled={!supportsPasskey || loading}
+          >
+            Prepare Recover
+          </button>
+          <button
+            className="btn btn-dark"
+            type="button"
+            onClick={handlePrepareRecoverByPasskey}
+            disabled={!supportsPasskey || loading}
+          >
+            Sign and Prepare Recover
+          </button>
+        </div>
       </article>
     </section>
   );

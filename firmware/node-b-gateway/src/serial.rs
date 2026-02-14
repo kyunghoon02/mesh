@@ -1,7 +1,7 @@
-﻿use embedded_io::{ErrorKind, Read, Write};
+use embedded_io::{ErrorKind, Read, Write};
 
-// UART/Serial로 길이 프레이밍 처리
-// 프레임: [len_lo, len_hi, payload...]
+// UART/Serial 수신/송신을 처리하는 단순 버퍼 기반 매니저
+// 프레임 형식: [len_lo, len_hi, payload]
 pub struct SerialManager<U> {
     uart: U,
     len_buf: [u8; 2],
@@ -31,10 +31,10 @@ where
         }
     }
 
-    /// 프레임 1개를 논블로킹으로 읽는다.
-    /// - 완전 수신 시 Ok(Some(len)) 반환
-    /// - 아직 미완성 시 Ok(None)
-    /// - 길이 오류/IO 오류는 Err
+    /// 1바이트씩 읽되 프레임이 완성될 때까지 버퍼링한다.
+    /// - 정상 수신: Ok(Some(len)) 반환
+    /// - 입력 부족: Ok(None)
+    /// - 기타 IO/길이 오류: Err
     pub fn poll_read_frame(&mut self, buf: &mut [u8]) -> Result<Option<usize>, SerialError> {
         if self.payload_len.is_none() {
             // 길이 헤더(2바이트) 읽기

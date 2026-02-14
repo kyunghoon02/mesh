@@ -3,16 +3,18 @@ pragma solidity ^0.8.20;
 
 import {IPasskeyVerifier} from "./interfaces/IPasskeyVerifier.sol";
 
-/// @title MeshVault - 최소 구현 SCA
-/// @notice EOA(하드웨어) 소유자 + Passkey(P-256) 공개키 보관 + ERC-1271 검증
+/// @title MeshVault - Hardware-rooted SCA
+/// @notice Supports owner signatures, optional passkey signatures, and ERC-1271 checks.
 contract MeshVault {
-    // ERC-1271 magic value
+    // ERC-1271 return value for valid signatures
     bytes4 internal constant MAGICVALUE = 0x1626ba7e;
+    // Prefix used only for passkey signature payload
+    bytes1 internal constant PASSKEY_SIG_PREFIX = 0x50;
 
-    address public owner;               // 현재 하드웨어 서명자
-    bytes public passkeyPubkey;         // WebAuthn P-256 공개키
-    address public passkeyVerifier;     // P-256/WebAuthn 검증 컨트랙트
-    uint256 public recoveryNonce;       // 복구 리플레이 방지
+    address public owner; // Current owner
+    bytes public passkeyPubkey; // Stored passkey public key (raw uncompressed x||y)
+    address public passkeyVerifier; // Address of passkey verifier contract
+    uint256 public recoveryNonce; // nonce for recovery operations
 
     event OwnerUpdated(address indexed oldOwner, address indexed newOwner);
     event PasskeyUpdated(bytes newPubkey);
@@ -30,7 +32,7 @@ contract MeshVault {
         passkeyPubkey = passkeyPubkey_;
     }
 
-    /// @notice 소유자(하드웨어 키) 변경
+    /// @notice Change owner
     function setOwner(address newOwner) external onlyOwner {
         require(newOwner != address(0), "owner=0");
         address old = owner;
@@ -38,20 +40,20 @@ contract MeshVault {
         emit OwnerUpdated(old, newOwner);
     }
 
-    /// @notice Passkey 공개키 갱신 (EOA 소유자만)
+    /// @notice Register or replace passkey pubkey
     function setPasskey(bytes calldata newPubkey) external onlyOwner {
         passkeyPubkey = newPubkey;
         emit PasskeyUpdated(newPubkey);
     }
 
-    /// @notice Passkey 검증 컨트랙트 주소 설정
+    /// @notice Register or replace passkey verifier address
     function setPasskeyVerifier(address verifier) external onlyOwner {
         passkeyVerifier = verifier;
         emit PasskeyVerifierUpdated(verifier);
     }
 
-    /// @notice Passkey로 소유자 복구
-    /// @dev challenge = keccak256("MESH_RECOVER", this, chainid, newOwner, nonce)
+    /// @notice Recover owner via passkey signature
+    /// @dev challenge = keccak256("MESH_RECOVER", this, chainid, newOwner, recoveryNonce)
     function recoverOwner(
         address newOwner,
         bytes calldata authenticatorData,
@@ -81,16 +83,20 @@ contract MeshVault {
         recoveryNonce++;
     }
 
-    /// @notice ERC-1271 메시지 서명 검증 (EOA 서명 기반)
+    /// @notice ERC-1271 signature verification (owner EOA + optional passkey payload)
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
-        address signer = _recover(hash, signature);
-        if (signer == owner) {
+        if (_isOwnerSignature(hash, signature)) {
             return MAGICVALUE;
         }
+
+        if (_isPasskeySignature(hash, signature)) {
+            return MAGICVALUE;
+        }
+
         return 0xffffffff;
     }
 
-    /// @notice 단일 트랜잭션 실행 (EOA 소유자만)
+    /// @notice Execute one call, owner only
     function execute(address to, uint256 value, bytes calldata data) external onlyOwner returns (bytes memory) {
         require(to != address(0), "to=0");
         (bool ok, bytes memory ret) = to.call{value: value}(data);
@@ -98,7 +104,7 @@ contract MeshVault {
         return ret;
     }
 
-    /// @notice 배치 실행
+    /// @notice Execute multiple calls, owner only
     function executeBatch(
         address[] calldata to,
         uint256[] calldata value,
@@ -116,6 +122,73 @@ contract MeshVault {
 
     receive() external payable {}
 
+    /// @dev Owner signature check (ecrecover path)
+    function _isOwnerSignature(bytes32 hash, bytes calldata signature) internal view returns (bool) {
+        address signer = _recover(hash, signature);
+        return signer == owner;
+    }
+
+    /// @dev Passkey signature check.
+    /// Format:
+    /// - [0]: 0x50 prefix
+    /// - [1:]: abi.encode(authenticatorData, clientDataJSON, signature, pubkey)
+    function _isPasskeySignature(bytes32 hash, bytes calldata signature) internal view returns (bool) {
+        if (signature.length < 1 || signature[0] != PASSKEY_SIG_PREFIX) {
+            return false;
+        }
+        if (passkeyVerifier == address(0) || passkeyPubkey.length == 0) {
+            return false;
+        }
+
+        bytes memory payload = signature[1:];
+        bytes memory authenticatorData;
+        bytes memory clientDataJSON;
+        bytes memory passkeySig;
+        bytes memory passkeyPub;
+
+        try this._decodePasskeyPayload(payload) returns (bytes memory a, bytes memory c, bytes memory pSig, bytes memory pPub) {
+            authenticatorData = a;
+            clientDataJSON = c;
+            passkeySig = pSig;
+            passkeyPub = pPub;
+        } catch {
+            return false;
+        }
+
+        if (passkeyPub.length != passkeyPubkey.length) {
+            return false;
+        }
+        if (keccak256(passkeyPub) != keccak256(passkeyPubkey)) {
+            return false;
+        }
+
+        try IPasskeyVerifier(passkeyVerifier).verify(
+            authenticatorData,
+            clientDataJSON,
+            passkeySig,
+            passkeyPubkey,
+            hash
+        ) returns (bool ok) {
+            return ok;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev Decode helper for passkey payload
+    function _decodePasskeyPayload(bytes memory payload) external pure returns (
+        bytes memory authenticatorData,
+        bytes memory clientDataJSON,
+        bytes memory signature,
+        bytes memory pubkey
+    ) {
+        (authenticatorData, clientDataJSON, signature, pubkey) = abi.decode(
+            payload,
+            (bytes, bytes, bytes, bytes)
+        );
+    }
+
+    /// @dev ecrecover helper
     function _recover(bytes32 hash, bytes memory sig) internal pure returns (address) {
         if (sig.length != 65) return address(0);
 

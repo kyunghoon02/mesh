@@ -9,7 +9,7 @@ pub struct CommManager<'a> {
 
 impl<'a> CommManager<'a> {
     pub fn new(mut esp_now: EspNow<'a>, node_a_mac: [u8; 6]) -> Self {
-        // Node A의 ESP-NOW peer 정보를 등록한다.
+        // Node A의 MAC을 peer로 등록한다.
         match esp_now.add_peer(PeerInfo {
             interface: EspNowWifiInterface::Sta,
             peer_address: node_a_mac,
@@ -18,11 +18,11 @@ impl<'a> CommManager<'a> {
             encrypt: false,
         }) {
             Ok(_) => {
-                esp_println::println!("Peer 등록 완료: {:?}", node_a_mac);
+                esp_println::println!("Peer 등록 성공: {:?}", node_a_mac);
             }
             Err(_) => {
                 esp_println::println!(
-                    "Peer 등록 실패/이미 등록된 상태일 수 있음: {:?}",
+                    "Peer 등록 실패: {:?} (이미 등록되었거나 잠시 후 다시 시도)",
                     node_a_mac
                 );
             }
@@ -39,36 +39,38 @@ impl<'a> CommManager<'a> {
             let src = data.info.src_addr;
             let len = data.len as usize;
 
-            if src != self.peer_address {
-                esp_println::println!(
-                    "알 수 없는 노드 패킷 차단: recv={:?}, allow={:?}",
-                    src,
-                    self.peer_address
-                );
-                return None;
-            }
-
             if len == 0 {
-                esp_println::println!("ESP-NOW 패킷 길이 0 수신");
+                esp_println::println!("ESP-NOW 수신 길이 0 건너뜀");
                 return None;
             }
 
             if len > data.data.len() {
-                // 수신 길이가 내부 버퍼 길이보다 큰 경우는 드물지만 방어적으로 로그 남김
                 esp_println::println!(
-                    "ESP-NOW 길이 이상치: len={} data_len={}",
+                    "ESP-NOW 길이 비정상: len={} data_len={}",
                     len,
                     data.data.len()
                 );
                 return None;
             }
 
-            // data 필드에서 실제 수신 길이만 역직렬화 (패딩은 제외).
+            if src != self.peer_address {
+                esp_println::println!(
+                    "허용되지 않은 발신 MAC 필터링: recv={:?}, allow={:?}",
+                    src,
+                    self.peer_address
+                );
+                return None;
+            }
+
             let raw_data = &data.data[..len];
             match from_bytes::<SecurePacket>(raw_data) {
                 Ok(packet) => Some(packet),
                 Err(_) => {
-                    esp_println::println!("ESP-NOW 패킷 역직렬화 실패: len={} src={:?}", len, src);
+                    esp_println::println!(
+                        "ESP-NOW 데이터 역직렬화 실패: len={} src={:?}",
+                        len,
+                        src
+                    );
                     None
                 }
             }
@@ -82,7 +84,7 @@ impl<'a> CommManager<'a> {
         let serialized = match to_slice(packet, &mut buf) {
             Ok(v) => v,
             Err(_) => {
-                esp_println::println!("ESP-NOW 패킷 직렬화 실패");
+                esp_println::println!("ESP-NOW 직렬화 실패");
                 return Err(());
             }
         };
@@ -90,13 +92,13 @@ impl<'a> CommManager<'a> {
         let token = match self.esp_now.send(&self.peer_address, serialized) {
             Ok(t) => t,
             Err(_) => {
-                esp_println::println!("ESP-NOW send 호출 실패: to={:?}", self.peer_address);
+                esp_println::println!("ESP-NOW send 실패: to={:?}", self.peer_address);
                 return Err(());
             }
         };
 
         if let Err(_) = token.wait() {
-            esp_println::println!("ESP-NOW send 대기 실패: to={:?}", self.peer_address);
+            esp_println::println!("ESP-NOW send 완료 대기 실패: to={:?}", self.peer_address);
             return Err(());
         }
 

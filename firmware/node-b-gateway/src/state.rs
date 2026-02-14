@@ -1,14 +1,10 @@
-﻿/// Node B 상태 머신
-/// 보안 정책: 부팅 후 5분 이내에만 페어링 허용
-/// 또는 버튼 조합 입력 시 허용 (추후 구현 예정)
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairingState {
-    /// 아직 peer 설정 없음
+    /// 아직 페어링되지 않은 상태
     Unpaired,
-    /// 현재 페어링 모드, Node A 확인 대기중
+    /// 페어링 시도 중 상태. Node A에 페어링 정보 승인이 필요
     Pairing,
-    /// 페어링 성공, 서명 요청 준비 완료
+    /// 페어링 완료 상태. 하드웨어 승인 완료 후 자동으로 작동
     Ready,
 }
 
@@ -16,7 +12,7 @@ pub struct StateManager {
     state: PairingState,
     peer_mac: Option<[u8; 6]>,
     boot_time_ms: u64,
-    pairing_window_ms: u64, // 기본값 5분 (300_000 ms)
+    pairing_window_ms: u64, // 부팅 후 5분(300_000ms) 안에만 허용
 }
 
 impl StateManager {
@@ -25,7 +21,7 @@ impl StateManager {
             state: PairingState::Unpaired,
             peer_mac: None,
             boot_time_ms,
-            pairing_window_ms: 300_000, // 5분
+            pairing_window_ms: 300_000,
         }
     }
 
@@ -37,19 +33,18 @@ impl StateManager {
         self.peer_mac
     }
 
-    /// 시간 윈도우 기반으로 페어링 가능 여부 확인
+    /// 부팅 5분 이내에만 페어링 진입을 허용한다.
     pub fn can_enter_pairing(&self, current_time_ms: u64) -> bool {
         match self.state {
             PairingState::Unpaired => {
-                // 부팅 후 페어링 윈도우 내에만 허용
                 (current_time_ms - self.boot_time_ms) < self.pairing_window_ms
             }
-            PairingState::Pairing => true, // 이미 페어링 모드
-            PairingState::Ready => false,  // 이미 페어링 완료
+            PairingState::Pairing => true,
+            PairingState::Ready => false,
         }
     }
 
-    /// 페어링 모드 진입 (보안 게이트: 시간 윈도우 확인)
+    /// 페어링 진입 시도
     pub fn enter_pairing(&mut self, current_time_ms: u64) -> Result<(), PairingError> {
         if !self.can_enter_pairing(current_time_ms) {
             return Err(PairingError::WindowExpired);
@@ -59,7 +54,7 @@ impl StateManager {
         Ok(())
     }
 
-    /// Node A MAC 주소로 페어링 확정
+    /// 페어링 완료 후 Peer MAC 확인해 READY 상태로 전환
     pub fn confirm_pairing(&mut self, mac: [u8; 6]) -> Result<(), PairingError> {
         if self.state != PairingState::Pairing {
             return Err(PairingError::InvalidState);
@@ -70,22 +65,44 @@ impl StateManager {
         Ok(())
     }
 
-    /// 서명 요청 가능 여부 확인
+    /// 부팅 시 저장된 Peer MAC이 있으면 READY 상태로 복귀
+    pub fn restore_paired(&mut self, mac: [u8; 6]) {
+        self.peer_mac = Some(mac);
+        self.state = PairingState::Ready;
+    }
+
+    /// 하드웨어 서명 허용 여부
     pub fn can_sign(&self) -> bool {
         self.state == PairingState::Ready
     }
 
-    /// 페어링 리셋 (테스트 또는 공장 초기화용)
+    /// 페어링 상태 초기화
     pub fn reset(&mut self) {
         self.state = PairingState::Unpaired;
         self.peer_mac = None;
+    }
+
+    /// 페어링 진행 시간이 만료되면 상태를 Unpaired로 되돌린다.
+    /// 만료되었을 때 true, 아니면 false를 반환한다.
+    pub fn expire_pairing_if_needed(&mut self, current_time_ms: u64) -> bool {
+        let should_expire = match self.state {
+            PairingState::Pairing => !self.can_enter_pairing(current_time_ms),
+            _ => false,
+        };
+
+        if should_expire {
+            self.reset();
+            return true;
+        }
+
+        false
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairingError {
-    /// 페어링 윈도우 만료
+    /// 페어링 시간이 만료됨
     WindowExpired,
-    /// 잘못된 상태에서 호출
+    /// 페어링 상태가 유효하지 않음
     InvalidState,
 }

@@ -9,16 +9,21 @@ use axum::{
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key,
+    aead::{AeadInPlace, KeyInit},
+};
+use postcard::from_bytes;
 use serde_json::{Value, json};
 use sha3::{Digest, Keccak256};
 use tracing::{error, info, warn};
 
-use common::{PacketType, SecurePacket, SignRequestPayload, TransactionIntent};
+use common::{PacketType, SecurePacket, SerialResponse, SignRequestPayload, TransactionIntent};
 use heapless::String as HString;
 
 use crate::abi::{
-    address_to_hex, encode_create_account, encode_get_address, parse_abi_address, parse_address,
-    parse_bytes32, parse_hex_bytes, to_hex,
+    address_to_hex, encode_create_account, encode_get_address, encode_recover_owner,
+    encode_set_passkey, parse_abi_address, parse_address, parse_bytes32, parse_hex_bytes, to_hex,
 };
 use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
 use crate::eth_rpc::{fetch_tx_receipt, parse_receipt_status};
@@ -62,7 +67,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     let has_id = obj.contains_key("id");
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
 
-    // id가 없거나 null이면 JSON-RPC 요청 자체를 무시한다.
+    // id媛 ?녾굅??null?대㈃ JSON-RPC ?붿껌 ?먯껜瑜?臾댁떆?쒕떎.
     if !has_id || id.is_null() {
         return None;
     }
@@ -118,6 +123,14 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         return Some(handle_get_passkey(req, state).await);
     }
 
+    if method == "mesh_prepareSetPasskey" {
+        return Some(handle_prepare_set_passkey(req, state).await);
+    }
+
+    if method == "mesh_prepareRecover" {
+        return Some(handle_prepare_recover(req, state).await);
+    }
+
     if method == "mesh_setPasskey" {
         return Some(handle_set_passkey(req, state).await);
     }
@@ -140,7 +153,20 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }
     }
 
-    // 업스트림 RPC가 없으면 에러로 반환하고 요청을 더 이상 처리하지 않는다.
+    if matches!(
+        method,
+        "eth_sign"
+            | "personal_sign"
+            | "eth_signTypedData"
+            | "eth_signTypedData_v3"
+            | "eth_signTypedData_v4"
+    ) {
+        if let Some(resp) = send_sign_request_if_possible(state, req, method).await {
+            return Some(resp);
+        }
+    }
+
+    // ?낆뒪?몃┝ RPC媛 ?놁쑝硫??먮윭濡?諛섑솚?섍퀬 ?붿껌?????댁긽 泥섎━?섏? ?딅뒗??
     let upstream = resolve_upstream(state, req).await;
     if upstream.is_empty() {
         return Some(json!({
@@ -202,7 +228,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(parse_bytes32);
 
     let mut factory = None;
-    // 체인별 패스키 지원 여부(미지원 체인은 EOA 복구만)
+    // 泥댁씤蹂??⑥뒪??吏???щ?(誘몄???泥댁씤? EOA 蹂듦뎄留?
     let mut supports_passkey = false;
     if let (Some(db), Some(chain_id)) = (&state.db, chain_opt) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
@@ -231,10 +257,19 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    // 패스키 지원 체인에서는 passkey_pubkey 필수, 미지원 체인은 빈 값 허용
+    // ?⑥뒪??吏??泥댁씤?먯꽌??passkey_pubkey ?꾩닔, 誘몄???泥댁씤? 鍮?媛??덉슜
     let passkey = if supports_passkey {
         match passkey {
-            Some(v) => v,
+            Some(v) => {
+                if !is_valid_passkey(&v) {
+                    return json!({
+                        "jsonrpc":"2.0",
+                        "id": id,
+                        "error": {"code": -32602, "message": "invalid passkey_pubkey length"}
+                    });
+                }
+                v
+            }
             None => {
                 return json!({
                     "jsonrpc":"2.0",
@@ -244,7 +279,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
             }
         }
     } else {
-        // Passkey 미지원 체인은 빈 pubkey 허용
+        // Passkey 誘몄???泥댁씤? 鍮?pubkey ?덉슜
         passkey.unwrap_or_default()
     };
 
@@ -403,7 +438,7 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // UI에서 저장한 체인별 패스키 지원 플래그
+    // UI에서 전달된 passkey 지원 여부 기본값은 false.
     let supports_passkey = first
         .and_then(|m| {
             m.get("supports_passkey")
@@ -482,6 +517,370 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
     }
 }
 
+async fn handle_prepare_set_passkey(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            });
+        }
+    };
+
+    let passkey_hex = first
+        .and_then(|m| m.get("passkey_pubkey").or_else(|| m.get("passkeyPubkey")))
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_bytes);
+    let passkey = match passkey_hex {
+        Some(v) => {
+            if !is_valid_passkey(&v) {
+                return json!({
+                    "jsonrpc":"2.0",
+                    "id": id,
+                    "error": {"code": -32602, "message": "invalid passkey_pubkey length"}
+                });
+            }
+            v
+        }
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid passkey_pubkey"}
+            });
+        }
+    };
+
+    let from = first
+        .and_then(|m| m.get("from"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            });
+        }
+    };
+
+    let cfg = match get_chain_config(db, chain_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32021, "message": "chain config not found"}
+            });
+        }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    };
+
+    let supports_passkey = cfg
+        .get("supports_passkey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !supports_passkey {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "passkey not supported on this chain"}
+        });
+    }
+
+    let sca_address = cfg.get("sca_address").and_then(|v| v.as_str());
+    let status = cfg
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("inactive");
+    if sca_address.is_none() {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "sca_address is not configured"}
+        });
+    }
+    if status != "active" {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32020, "message": format!("sca not active: {}", status)}
+        });
+    }
+
+    let sca = sca_address.unwrap().to_string();
+    if parse_address(&sca).is_none() {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "invalid sca_address"}
+        });
+    }
+
+    let calldata = encode_set_passkey(&passkey);
+    let mut tx = json!({
+        "to": sca,
+        "data": to_hex(&calldata),
+        "value": "0x0"
+    });
+    if let Some(from_addr) = from {
+        tx["from"] = Value::String(address_to_hex(from_addr));
+    }
+
+    json!({
+        "jsonrpc":"2.0",
+        "id": id,
+        "result": {
+            "tx": tx,
+            "request": {
+                "method": "eth_sendTransaction",
+                "params": [tx],
+                "jsonrpc": "2.0",
+                "id": 1
+            }
+        }
+    })
+}
+
+async fn handle_prepare_recover(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            });
+        }
+    };
+
+    let owner = first
+        .and_then(|m| m.get("owner"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+    let new_owner = first
+        .and_then(|m| m.get("new_owner").or_else(|| m.get("newOwner")))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let auth_data = first
+        .and_then(|m| {
+            m.get("authenticator_data")
+                .or_else(|| m.get("authenticatorData"))
+        })
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_bytes);
+    let client_json = first
+        .and_then(|m| {
+            m.get("client_data_json")
+                .or_else(|| m.get("clientDataJSON"))
+        })
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_bytes);
+    let signature = first
+        .and_then(|m| m.get("signature"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_bytes);
+
+    let from = first
+        .and_then(|m| m.get("from"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let owner = match owner {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid owner"}
+            });
+        }
+    };
+
+    let new_owner = match new_owner {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid new_owner"}
+            });
+        }
+    };
+
+    let auth_data = match auth_data {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid authenticator_data"}
+            });
+        }
+    };
+    let client_json = match client_json {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid client_data_json"}
+            });
+        }
+    };
+    let signature = match signature {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid signature"}
+            });
+        }
+    };
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            });
+        }
+    };
+
+    let cfg = match get_chain_config(db, chain_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32021, "message": "chain config not found"}
+            });
+        }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    };
+
+    let supports_passkey = cfg
+        .get("supports_passkey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !supports_passkey {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "passkey not supported on this chain"}
+        });
+    }
+
+    if cfg.get("status").and_then(|v| v.as_str()) != Some("active") {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "wallet is not active"}
+        });
+    }
+
+    let sca_address = match cfg.get("sca_address").and_then(|v| v.as_str()) {
+        Some(v) if parse_address(v).is_some() => v.to_string(),
+        _ => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "sca_address is not configured"}
+            });
+        }
+    };
+
+    let stored_passkey = match get_passkey(db, &address_to_hex(owner), chain_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32021, "message": "passkey is not registered"}
+            });
+        }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    };
+    let passkey_stored = stored_passkey
+        .get("passkey_pubkey")
+        .and_then(|v| v.as_str())
+        .is_some();
+    if !passkey_stored {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32021, "message": "passkey is not registered"}
+        });
+    }
+
+    let calldata = encode_recover_owner(new_owner, &auth_data, &client_json, &signature);
+    let mut tx = json!({
+        "to": sca_address,
+        "data": to_hex(&calldata),
+        "value": "0x0"
+    });
+    if let Some(from_addr) = from {
+        tx["from"] = Value::String(address_to_hex(from_addr));
+    }
+
+    json!({
+        "jsonrpc":"2.0",
+        "id": id,
+        "result": {
+            "tx": tx,
+            "request": {
+                "method": "eth_sendTransaction",
+                "params": [tx],
+                "jsonrpc": "2.0",
+                "id": 1
+            }
+        }
+    })
+}
+
 async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let params = req.get("params").and_then(|p| p.as_array());
@@ -497,9 +896,14 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
         .and_then(parse_chain_id_value)
         .or(state.chain_id);
 
-    let passkey_hex = first
+    let passkey_str = first
         .and_then(|m| m.get("passkey_pubkey").or_else(|| m.get("passkeyPubkey")))
         .and_then(|v| v.as_str());
+
+    let from = first
+        .and_then(|m| m.get("from"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
 
     let credential_id = first
         .and_then(|m| m.get("credential_id").or_else(|| m.get("credentialId")))
@@ -533,8 +937,17 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    let passkey_hex = match passkey_hex.and_then(parse_hex_bytes) {
-        Some(bytes) => to_hex(&bytes),
+    let passkey_bytes = match passkey_str.and_then(parse_hex_bytes) {
+        Some(bytes) => {
+            if !is_valid_passkey(&bytes) {
+                return json!({
+                    "jsonrpc":"2.0",
+                    "id": id,
+                    "error": {"code": -32602, "message": "invalid passkey_pubkey length"}
+                });
+            }
+            bytes
+        }
         None => {
             return json!({
                 "jsonrpc":"2.0",
@@ -555,33 +968,108 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    // 미지원 체인은 Passkey 등록/갱신 금지
-    if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
-        let supports = cfg
-            .get("supports_passkey")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !supports {
+    let cfg = match get_chain_config(db, chain_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json!({
                 "jsonrpc":"2.0",
                 "id": id,
-                "error": {"code": -32602, "message": "passkey not supported on this chain"}
+                "error": {"code": -32021, "message": "chain config not found"}
             });
         }
-    }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    };
 
-    match upsert_passkey(db, &owner, chain_id, &passkey_hex, credential_id, rp_id).await {
-        Ok(_) => json!({
+    if !cfg
+        .get("supports_passkey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return json!({
             "jsonrpc":"2.0",
             "id": id,
-            "result": true
-        }),
-        Err(e) => json!({
+            "error": {"code": -32602, "message": "passkey not supported on this chain"}
+        });
+    }
+
+    if let Err(e) = upsert_passkey(
+        db,
+        &owner,
+        chain_id,
+        &to_hex(&passkey_bytes),
+        credential_id,
+        rp_id,
+    )
+    .await
+    {
+        return json!({
             "jsonrpc":"2.0",
             "id": id,
             "error": {"code": -32020, "message": e}
-        }),
+        });
     }
+
+    let should_prepare =
+        from.is_some() && cfg.get("status").and_then(|v| v.as_str()) == Some("active");
+    if !should_prepare {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": {"stored": true}
+        });
+    }
+
+    let sca_address = match cfg.get("sca_address").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "result": {"stored": true}
+            });
+        }
+    };
+
+    if parse_address(sca_address).is_none() {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": {
+                "stored": true,
+                "warning": "invalid sca_address in chain config"
+            }
+        });
+    }
+
+    let from = address_to_hex(from.unwrap());
+    let calldata = encode_set_passkey(&passkey_bytes);
+    let tx = json!({
+        "to": sca_address,
+        "data": to_hex(&calldata),
+        "value": "0x0",
+        "from": from
+    });
+
+    json!({
+        "jsonrpc":"2.0",
+        "id": id,
+        "result": {
+            "stored": true,
+            "tx": tx,
+            "request": {
+                "method": "eth_sendTransaction",
+                "params": [tx],
+                "jsonrpc": "2.0",
+                "id": 1
+            }
+        }
+    })
 }
 
 async fn handle_get_passkey(req: &Value, state: &AppState) -> Value {
@@ -684,6 +1172,11 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
+    let owner = first
+        .and_then(|m| m.get("from"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
     let tx_hash = match tx_hash {
         Some(v) => v,
         None => {
@@ -722,6 +1215,8 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
         },
     };
 
+    let mut setpasskey_request = None;
+
     if status != "pending" {
         if let Some(db) = &state.db {
             let receipt_factory = receipt.as_ref().and_then(extract_receipt_to_address);
@@ -743,6 +1238,8 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
             }
+            let sca_for_setpasskey = resolved_sca.clone();
+
             let _ = upsert_chain_config(
                 db,
                 chain_id,
@@ -760,6 +1257,36 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
             }
             if let Some(sca) = resolved_sca {
                 info!("mesh_confirmDeploy sca resolved: {}", sca);
+            }
+
+            if supports_passkey && status == "active" {
+                if let (Some(owner_addr), Some(sca)) = (owner, sca_for_setpasskey.as_deref()) {
+                    if let Ok(Some(passkey_record)) = get_passkey(db, &address_to_hex(owner_addr), chain_id).await
+                    {
+                        if let Some(pubkey) = passkey_record
+                            .get("passkey_pubkey")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_hex_bytes)
+                        {
+                            if is_valid_passkey(&pubkey) {
+                                let calldata = encode_set_passkey(&pubkey);
+                                let tx = json!({
+                                    "to": sca,
+                                    "data": to_hex(&calldata),
+                                    "value": "0x0",
+                                    "from": address_to_hex(owner_addr)
+                                });
+
+                                setpasskey_request = Some(json!({
+                                    "method": "eth_sendTransaction",
+                                    "params": [tx],
+                                    "jsonrpc": "2.0",
+                                    "id": 1
+                                }));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -781,6 +1308,8 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
             "factory_address": receipt
                 .as_ref()
                 .and_then(|r| factory_address.clone().or_else(|| extract_receipt_to_address(r)))
+            ,
+            "setpasskey_request": setpasskey_request,
         }
     })
 }
@@ -790,6 +1319,7 @@ async fn send_sign_request_if_possible(
     req: &Value,
     method: &str,
 ) -> Option<Value> {
+    let request_id = req.get("id").cloned().unwrap_or(Value::Null);
     let require_hw = matches!(state.approval_mode, ApprovalMode::Block);
 
     let serial = match &state.serial {
@@ -798,7 +1328,7 @@ async fn send_sign_request_if_possible(
             if require_hw {
                 return Some(json!({
                     "jsonrpc": "2.0",
-                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "id": request_id,
                     "error": {"code": -32011, "message": "SERIAL_PORT not configured"}
                 }));
             }
@@ -806,20 +1336,58 @@ async fn send_sign_request_if_possible(
         }
     };
 
-    // SecurePacket 생성: 서명 요청 바디가 잘못되어도 안전하게 실패 처리하며
-    // 하드웨어 요청 전까지 동일 파이프라인을 유지한다.
+    // SecurePacket 생성: SignRequestPayload 직렬화가 실패하면 즉시 에러로 반환한다.
     let counter = state.counter.fetch_add(1, Ordering::Relaxed);
-    let packet = build_secure_packet(method, req, counter);
+    let packet = match build_secure_packet(method, req, counter, &state.aead_key) {
+        Some(v) => v,
+        None => {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32014,
+                    "message": "invalid sign request payload"
+                }
+            }));
+        }
+    };
 
     let seq = state.seq.fetch_add(1, Ordering::Relaxed);
     match serial.send_sign_request(seq, &packet).await {
         Ok(resp) => {
             if resp.success {
+                if is_signature_request(method) {
+                    if let Some(signature) = extract_signature_from_response(&resp, &state.aead_key)
+                    {
+                        return Some(json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": to_hex(&signature)
+                        }));
+                    }
+
+                    warn!(
+                        "hardware sign response failed to decode signature: method={}",
+                        method
+                    );
+
+                    if require_hw {
+                        return Some(json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "error": {
+                                "code": -32013,
+                                "message": "invalid hardware signature response"
+                            }
+                        }));
+                    }
+                }
+
                 None
             } else if require_hw {
                 Some(json!({
                     "jsonrpc": "2.0",
-                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "id": request_id,
                     "error": {"code": -32012, "message": format!("hardware rejected: {}", resp.error_code)}
                 }))
             } else {
@@ -831,7 +1399,7 @@ async fn send_sign_request_if_possible(
             if require_hw {
                 Some(json!({
                     "jsonrpc": "2.0",
-                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "id": request_id,
                     "error": {"code": -32012, "message": e}
                 }))
             } else {
@@ -842,24 +1410,18 @@ async fn send_sign_request_if_possible(
     }
 }
 
-fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket {
-    let payload = match method {
-        "eth_sendRawTransaction" => req
-            .get("params")
-            .and_then(|p| p.get(0))
-            .and_then(|v| v.as_str())
-            .map(|s| s.as_bytes().to_vec())
-            .unwrap_or_default(),
-        _ => req
-            .get("params")
-            .and_then(|p| p.get(0))
-            .map(|v| serde_json::to_vec(v).unwrap_or_default())
-            .unwrap_or_default(),
+fn build_secure_packet(
+    method: &str,
+    req: &Value,
+    counter: u64,
+    aead_key: &[u8; 32],
+) -> Option<SecurePacket> {
+    let hash32 = match build_request_hash(method, req) {
+        Some(v) => v,
+        None => {
+            return None;
+        }
     };
-
-    let hash = Keccak256::digest(&payload);
-    let mut hash32 = [0u8; 32];
-    hash32.copy_from_slice(&hash);
 
     let intent = build_intent(method, req);
     let payload_struct = SignRequestPayload {
@@ -869,35 +1431,31 @@ fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket 
     let mut plain_buf = [0u8; 192];
     let plain_len = match postcard::to_slice(&payload_struct, &mut plain_buf) {
         Ok(slice) => slice.len(),
-        Err(_) => {
-            plain_buf[..32].copy_from_slice(&hash32);
-            32
-        }
+        Err(_) => return None,
     };
     let plain = &plain_buf[..plain_len];
 
     let boot_id = 1u32;
 
-    let (ciphertext, tag) = encrypt_payload(boot_id, counter, plain);
-    let mut packet = SecurePacket::new(PacketType::SignRequest, &ciphertext[..plain_len], tag)
-        .unwrap_or_else(|| SecurePacket::new(PacketType::SignRequest, &[], [0u8; 16]).unwrap());
+    let (ciphertext, tag) = encrypt_payload(boot_id, counter, plain, aead_key);
+    let mut packet = SecurePacket::new(PacketType::SignRequest, &ciphertext[..plain_len], tag)?;
     packet.counter = counter;
     packet.boot_id = boot_id;
-    packet
+    Some(packet)
 }
 
-fn encrypt_payload(boot_id: u32, counter: u64, plain: &[u8]) -> ([u8; 192], [u8; 16]) {
-    use chacha20poly1305::{
-        ChaCha20Poly1305, Key,
-        aead::{AeadInPlace, KeyInit},
-    };
-
+fn encrypt_payload(
+    boot_id: u32,
+    counter: u64,
+    plain: &[u8],
+    aead_key: &[u8; 32],
+) -> ([u8; 192], [u8; 16]) {
     let mut buf = [0u8; 192];
     if !plain.is_empty() {
         buf[..plain.len()].copy_from_slice(plain);
     }
 
-    let key = Key::from_slice(&[0u8; 32]);
+    let key = Key::from_slice(aead_key);
     let cipher = ChaCha20Poly1305::new(key);
     let nonce = build_nonce(boot_id, counter);
     let tag = if plain.is_empty() {
@@ -917,11 +1475,82 @@ fn build_nonce(boot_id: u32, counter: u64) -> chacha20poly1305::Nonce {
     chacha20poly1305::Nonce::from_slice(&out).to_owned()
 }
 
+fn is_signature_request(method: &str) -> bool {
+    matches!(
+        method,
+        "eth_sign"
+            | "personal_sign"
+            | "eth_signTypedData"
+            | "eth_signTypedData_v3"
+            | "eth_signTypedData_v4"
+    )
+}
+
+fn extract_signature_from_response(
+    response: &SerialResponse,
+    aead_key: &[u8; 32],
+) -> Option<Vec<u8>> {
+    let payload = response.payload_bytes();
+    if payload.is_empty() {
+        return None;
+    }
+
+    let packet: SecurePacket = from_bytes(payload).ok()?;
+    if packet.payload_type != PacketType::SignResponse {
+        return None;
+    }
+
+    if packet.ciphertext_len == 0 {
+        return None;
+    }
+
+    let (plain, plain_len) = match decrypt_packet_payload(&packet, aead_key) {
+        Some(v) => v,
+        None => return None,
+    };
+
+    Some(plain[..plain_len].to_vec())
+}
+
+fn decrypt_packet_payload(
+    packet: &SecurePacket,
+    aead_key: &[u8; 32],
+) -> Option<([u8; 192], usize)> {
+    let cipher_len = packet.ciphertext_len as usize;
+    if packet.auth_tag.iter().all(|b| *b == 0) {
+        return None;
+    }
+    if cipher_len == 0 || cipher_len > packet.ciphertext.len() {
+        return None;
+    }
+
+    let mut buf = [0u8; 192];
+    buf[..cipher_len].copy_from_slice(&packet.ciphertext[..cipher_len]);
+
+    let key = Key::from_slice(aead_key);
+    let cipher = ChaCha20Poly1305::new(key);
+    let nonce = build_nonce(packet.boot_id, packet.counter);
+
+    if cipher
+        .decrypt_in_place_detached(
+            &nonce,
+            b"",
+            &mut buf[..cipher_len],
+            chacha20poly1305::Tag::from_slice(&packet.auth_tag),
+        )
+        .is_ok()
+    {
+        Some((buf, cipher_len))
+    } else {
+        None
+    }
+}
+
 fn build_intent(method: &str, req: &Value) -> TransactionIntent {
     let chain_id = extract_chain_id(req).unwrap_or(0);
     let mut target_address = [0u8; 20];
     let mut eth_value = 0u128;
-    let risk_level: u8;
+    let mut risk_level: u8 = 1;
     let mut summary: HString<64> = HString::new();
 
     if method == "eth_sendTransaction" {
@@ -961,10 +1590,77 @@ fn build_intent(method: &str, req: &Value) -> TransactionIntent {
         if eth_value > 0 {
             let _ = write!(summary, " {} wei", eth_value);
         }
-    } else {
-        let _ = write!(summary, "Raw tx");
-        risk_level = 1;
+
+        return TransactionIntent {
+            chain_id,
+            target_address,
+            eth_value,
+            risk_level,
+            summary,
+        };
     }
+
+    if method == "eth_sign" {
+        let _ = write!(summary, "Signature request: eth_sign");
+        if let Some(addr) = req
+            .get("params")
+            .and_then(|p| p.get(0))
+            .and_then(|v| v.as_str())
+            .and_then(parse_address)
+        {
+            target_address = addr;
+        }
+        return TransactionIntent {
+            chain_id,
+            target_address,
+            eth_value,
+            risk_level,
+            summary,
+        };
+    }
+
+    if method == "personal_sign" {
+        let _ = write!(summary, "Signature request: personal_sign");
+        if let Some(addr) = req
+            .get("params")
+            .and_then(|p| p.get(1))
+            .and_then(|v| v.as_str())
+            .and_then(parse_address)
+        {
+            target_address = addr;
+        }
+        return TransactionIntent {
+            chain_id,
+            target_address,
+            eth_value,
+            risk_level,
+            summary,
+        };
+    }
+
+    if method == "eth_signTypedData"
+        || method == "eth_signTypedData_v3"
+        || method == "eth_signTypedData_v4"
+    {
+        let _ = write!(summary, "Signature request: typed data");
+        if let Some(addr) = req
+            .get("params")
+            .and_then(|p| p.get(0))
+            .and_then(|v| v.as_str())
+            .and_then(parse_address)
+        {
+            target_address = addr;
+        }
+        return TransactionIntent {
+            chain_id,
+            target_address,
+            eth_value,
+            risk_level,
+            summary,
+        };
+    }
+
+    let _ = write!(summary, "Raw tx");
 
     TransactionIntent {
         chain_id,
@@ -973,6 +1669,53 @@ fn build_intent(method: &str, req: &Value) -> TransactionIntent {
         risk_level,
         summary,
     }
+}
+fn build_request_hash(method: &str, req: &Value) -> Option<[u8; 32]> {
+    let params = req.get("params").and_then(|v| v.as_array())?;
+
+    let hash_input = match method {
+        "eth_sendRawTransaction" => {
+            let raw = params.get(0)?.as_str()?;
+            Some(raw.as_bytes().to_vec())
+        }
+        "eth_sign" => {
+            let msg = params
+                .get(1)
+                .or_else(|| params.get(0))
+                .and_then(|v| v.as_str())?;
+            parse_hex_bytes(msg).map(|bytes| bytes)
+        }
+        "personal_sign" => {
+            let msg = parse_hex_bytes(
+                params
+                    .get(0)
+                    .or_else(|| params.get(1))
+                    .and_then(|v| v.as_str())?,
+            )?;
+            let prefix = format!("\x19Ethereum Signed Message:\n{}", msg.len());
+            let mut data = Vec::with_capacity(prefix.len() + msg.len());
+            data.extend_from_slice(prefix.as_bytes());
+            data.extend_from_slice(&msg);
+            Some(data)
+        }
+        "eth_signTypedData" | "eth_signTypedData_v3" | "eth_signTypedData_v4" => {
+            let raw = params
+                .get(1)
+                .and_then(|v| v.as_str())
+                .or_else(|| params.get(0).and_then(|v| v.as_str()))?;
+            Some(raw.as_bytes().to_vec())
+        }
+        _ => {
+            let param = params.get(0)?;
+            serde_json::to_vec(param).ok()
+        }
+    };
+
+    let bytes = hash_input?;
+    let hash = Keccak256::digest(&bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hash);
+    Some(out)
 }
 
 fn log_send_tx(req: &Value) {
@@ -1023,6 +1766,10 @@ fn parse_chain_id_value(v: &Value) -> Option<u64> {
         return crate::abi::parse_chain_id_str(s);
     }
     v.as_u64()
+}
+
+fn is_valid_passkey(pubkey: &[u8]) -> bool {
+    pubkey.len() == 65
 }
 
 fn extract_chain_id(req: &Value) -> Option<u64> {

@@ -6,9 +6,10 @@ mod crypto;
 mod storage;
 mod ui;
 
-use common::{PacketType, SecurePacket, SignRequestPayload};
 use core::cell::RefCell;
 use core::fmt::Write;
+
+use common::{PacketType, SecurePacket, SignRequestPayload};
 use critical_section::Mutex;
 use embedded_graphics::pixelcolor::Rgb565;
 use esp_backtrace as _;
@@ -32,26 +33,20 @@ use mipidsi::{
 };
 use postcard::from_bytes;
 
-// 디스플레이 해상도 (T-Display S3 기준)
+// T-Display S3 1.9인치 기준 화면 크기
 const DISPLAY_WIDTH: u16 = 170;
 const DISPLAY_HEIGHT: u16 = 320;
 
-// T-Display S3 1.9인치 ST7789 (8080 병렬) 핀맵
-// LCD_BL=GPIO38
-// LCD_D0=GPIO39, D1=GPIO40, D2=GPIO41, D3=GPIO42
-// LCD_D4=GPIO45, D5=GPIO46, D6=GPIO47, D7=GPIO48
-// LCD_WR=GPIO08, LCD_RD=GPIO09, LCD_DC=GPIO07
-// LCD_CS=GPIO06, LCD_RES=GPIO05, LCD_Power_On=GPIO15
-
-// 패널 오프셋 (화면이 좌우로 밀리면 X 오프셋 조정)
+// 8080 인터페이스 핀 배치
 const DISPLAY_OFFSET_X: u16 = 0;
 const DISPLAY_OFFSET_Y: u16 = 0;
 
-// 버튼 핀맵 (보드에 맞게 수정 필요)
-// 사용자 버튼(GPIO14) 예시. GPIO0(BOOT)은 시스템 전용으로 남김.
-
-// 공유 상태 (폴링 방식으로 처리)
+// 버튼 입력(단일 버튼, 짧은/긴 누름 구분)
 static BUTTON_PIN: Mutex<RefCell<Option<Input<AnyPin>>>> = Mutex::new(RefCell::new(None));
+
+const PROTOCOL_VERSION: u8 = 1;
+const MAX_PAYLOAD_LEN: usize = 192;
+const PAIRING_WINDOW_MS: u64 = 5 * 60_000;
 
 struct PendingSign {
     hash: [u8; 32],
@@ -62,27 +57,84 @@ struct PendingSign {
 struct PendingPairing {
     counter: u64,
     boot_id: u32,
+    peer_mac: [u8; 6],
+}
+
+fn format_mac(mac: &[u8; 6]) -> String<20> {
+    let mut text = String::new();
+    let _ = write!(
+        text,
+        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+    text
+}
+
+fn is_replay_and_nonce_valid(
+    packet: &SecurePacket,
+    last_boot_id: &mut Option<u32>,
+    last_counter: &mut Option<u64>,
+) -> bool {
+    if packet.version != PROTOCOL_VERSION {
+        return false;
+    }
+
+    if packet.ciphertext_len as usize > MAX_PAYLOAD_LEN {
+        return false;
+    }
+
+    // 동일 세션(boot_id) 유지 시에는 counter가 증가해야만 유효한 요청
+    if last_boot_id != Some(packet.boot_id) {
+        *last_boot_id = Some(packet.boot_id);
+        *last_counter = None;
+    }
+
+    if let Some(last) = *last_counter {
+        if packet.counter <= last {
+            return false;
+        }
+    }
+
+    *last_counter = Some(packet.counter);
+    true
+}
+
+fn is_valid_sign_request_packet(packet: &SecurePacket) -> bool {
+    if packet.version != PROTOCOL_VERSION {
+        return false;
+    }
+
+    if packet.payload_type != PacketType::SignRequest {
+        return false;
+    }
+
+    let len = packet.ciphertext_len as usize;
+    if len == 0 || len > MAX_PAYLOAD_LEN {
+        return false;
+    }
+
+    if packet.auth_tag == [0u8; 16] {
+        return false;
+    }
+
+    true
 }
 
 #[entry]
 fn main() -> ! {
-    // Peripherals::take()는 Option이므로 안전하게 처리
     let peripherals = Peripherals::take().expect("Failed to take peripherals");
     let system = peripherals.SYSTEM.split();
     let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
     let mut rng = Rng::new(peripherals.RNG);
 
-    // 버튼 입력 설정 (단일 버튼)
+    // 버튼 입력 설정
     let user_btn = Input::new(io.pins.gpio14.into(), PullUp);
     critical_section::with(|cs| {
         BUTTON_PIN.borrow(cs).replace(Some(user_btn));
     });
 
-    // =========================
-    // ST7789 디스플레이 초기화 (8080 병렬)
-    // =========================
-    // 전원/제어 핀
+    // ST7789 초기화 (8080 병렬 인터페이스)
     let _lcd_power = Output::new(io.pins.gpio15, Level::High);
     let mut bl = Output::new(io.pins.gpio38, Level::Low);
     bl.set_high();
@@ -93,7 +145,6 @@ fn main() -> ! {
     let wr = Output::new(io.pins.gpio8, Level::High);
     let rst = Output::new(io.pins.gpio5, Level::High);
 
-    // 8비트 데이터 버스
     let d0 = Output::new(io.pins.gpio39, Level::Low);
     let d1 = Output::new(io.pins.gpio40, Level::Low);
     let d2 = Output::new(io.pins.gpio41, Level::Low);
@@ -118,10 +169,9 @@ fn main() -> ! {
     let _ = display.clear(Rgb565::BLACK);
 
     let mut ui = ui::UiManager::new(display);
-
     let mut storage = storage::StorageManager::new();
 
-    // 로드 또는 신규 생성
+    // 키 로딩/생성
     let km = if let Some(key) = storage.load_key() {
         crypto::KeyManager {
             secret_key: k256::SecretKey::from_slice(&key).unwrap(),
@@ -130,12 +180,14 @@ fn main() -> ! {
         let new_km = crypto::KeyManager::generate_new(&mut rng);
         storage
             .save_key(&new_km.secret_key.to_bytes().into())
-            .expect("Key Save Failed");
+            .expect("Key save failed");
         new_km
     };
 
-    // 주소 표시 (부팅 직후)
+    // 주소 생성 후 화면 표시
+    // 주소를 먼저 생성한 뒤 AEAD 키를 파생
     let addr = km.get_eth_address();
+    let aead_key = crypto::KeyManager::derive_aead_key_from_address(&addr);
     let mut addr_str: String<42> = String::new();
     let _ = write!(addr_str, "0x");
     for b in addr {
@@ -143,12 +195,13 @@ fn main() -> ! {
     }
     ui.display_address(&addr_str);
 
-    // 페어링된 노드 B MAC 로드 (없으면 임시 기본값)
-    let trusted_node_b_mac = storage
-        .load_peer_mac()
-        .unwrap_or([0x30, 0xAE, 0xA4, 0x98, 0x76, 0x54]);
+    // 저장된 페어링 대상 MAC을 로드
+    let stored_peer_mac = storage.load_peer_mac();
+    let trusted_node_b_mac = stored_peer_mac.unwrap_or([0u8; 6]);
+    let mut has_paired_peer = stored_peer_mac.is_some();
+    let mut current_peer_mac = trusted_node_b_mac;
 
-    // ESP-NOW 초기화 (키 생성 이후 RNG 소유권 이동)
+    // ESP-NOW 초기화
     let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
     let wifi_init = initialize(
         EspWifiInitFor::Wifi,
@@ -159,28 +212,23 @@ fn main() -> ! {
     )
     .expect("esp-wifi init failed");
     let esp_now = EspNow::new(&wifi_init, peripherals.WIFI).expect("esp-now init failed");
-    let comm = comm::CommManager::new(esp_now, trusted_node_b_mac);
+    let mut comm = comm::CommManager::new(esp_now, current_peer_mac);
 
-    // 서명 요청을 임시 저장하는 슬롯 (버튼 승인 전까지 대기)
     let mut pending_sign: Option<PendingSign> = None;
     let mut pending_pairing: Option<PendingPairing> = None;
     let mut last_counter: Option<u64> = None;
     let mut last_boot_id: Option<u32> = None;
 
-    // 버튼 눌림 길이 판별용
     let systimer = SystemTimer::new(peripherals.SYSTIMER);
+    let boot_time_ms = systimer.now() / 1000;
+    let pairing_deadline_ms = boot_time_ms + PAIRING_WINDOW_MS;
     let mut press_start_ms: Option<u64> = None;
     let mut prev_low = false;
     const MIN_PRESS_MS: u64 = 50;
     const LONG_PRESS_MS: u64 = 1200;
 
     loop {
-        // 흐름 요약
-        // 1) ESP-NOW로 SignRequest 수신 -> pending_sign 저장
-        // 2) 버튼 인터럽트 발생 -> 플래그 세팅
-        // 3) 메인 루프에서 플래그 확인 -> 서명 수행 -> SignResponse 전송
-
-        // 버튼 폴링 (눌림: LOW)
+        // 버튼 이벤트(짧게/길게)
         let button_low = critical_section::with(|cs| {
             let mut btn = BUTTON_PIN.borrow(cs).borrow_mut();
             btn.as_mut()
@@ -190,60 +238,82 @@ fn main() -> ! {
 
         let now_ms = systimer.now() / 1000;
 
-        // 눌림 시작
         if button_low && !prev_low {
             press_start_ms = Some(now_ms);
         }
-        // 눌림 종료 -> 길이 판단
+
+        if !has_paired_peer && now_ms > pairing_deadline_ms {
+            if pending_pairing.is_some() {
+                pending_pairing = None;
+                ui.display_message("페어링", "요청", "만료됨");
+            }
+        }
+
         if !button_low && prev_low {
             if let Some(start) = press_start_ms.take() {
                 let duration = now_ms.saturating_sub(start);
 
                 if duration >= LONG_PRESS_MS {
-                    esp_println::println!("길게 누름 감지 (거절)");
                     if let Some(pair) = pending_pairing.take() {
                         if send_node_a_response(
                             &mut comm,
+                            pair.peer_mac,
+                            &aead_key,
                             pair.counter,
                             pair.boot_id,
                             PacketType::ErrorMessage,
                             b"DENY",
                         ) {
-                            ui.display_message("페어링 거절", "요청을 거절했습니다", "");
+                            ui.display_message("페어링", "긴 누름", "취소 처리됨");
+                            has_paired_peer = false;
+                            current_peer_mac = pair.peer_mac;
                         }
                     } else if let Some(pending) = pending_sign.take() {
                         if send_node_a_response(
                             &mut comm,
+                            current_peer_mac,
+                            &aead_key,
                             pending.counter,
                             pending.boot_id,
                             PacketType::ErrorMessage,
                             b"DENY",
                         ) {
-                            ui.display_message("서명 거절", "요청을 거절했습니다", "");
+                            ui.display_message("서명", "긴 누름", "거절됨");
                         }
                     }
                 } else if duration >= MIN_PRESS_MS {
-                    esp_println::println!("짧게 누름 감지 (승인)");
                     if let Some(pair) = pending_pairing.take() {
-                        if send_node_a_response(
-                            &mut comm,
-                            pair.counter,
-                            pair.boot_id,
-                            PacketType::Handshake,
-                            b"OK",
-                        ) {
-                            ui.display_message("페어링 승인", "연결을 허용했습니다", "");
+                        if storage.save_peer_mac(&pair.peer_mac).is_ok() {
+                            has_paired_peer = true;
+                            current_peer_mac = pair.peer_mac;
+                            if send_node_a_response(
+                                &mut comm,
+                                pair.peer_mac,
+                                &aead_key,
+                                pair.counter,
+                                pair.boot_id,
+                                PacketType::Handshake,
+                                b"OK",
+                            ) {
+                                ui.display_message("페어링", "짧게 누름", "승인됨");
+                            } else {
+                                ui.display_message("페어링", "승인됨", "응답 전송 실패");
+                            }
+                        } else {
+                            ui.display_message("페어링", "저장 실패", "재시도 필요");
                         }
                     } else if let Some(pending) = pending_sign.take() {
                         if let Some(sig) = km.sign_hash(&pending.hash) {
                             if send_node_a_response(
                                 &mut comm,
+                                current_peer_mac,
+                                &aead_key,
                                 pending.counter,
                                 pending.boot_id,
                                 PacketType::SignResponse,
                                 &sig,
                             ) {
-                                ui.display_message("서명 완료", "승인 결과를 전송했습니다", "");
+                                ui.display_message("서명", "짧게 누름", "승인 완료");
                             }
                         }
                     }
@@ -252,95 +322,109 @@ fn main() -> ! {
         }
         prev_low = button_low;
 
-        if let Some(packet) = comm.receive_packet() {
-            // 기본 검증
-            if packet.version != 1 {
-                esp_println::println!("버전 불일치 - 차단");
+        if let Some(envelope) = comm.receive_packet_with_src() {
+            let packet = envelope.packet;
+            let src_addr = envelope.src_addr;
+            let is_trusted_src = envelope.trusted;
+
+            // 버전, 길이, nonce(counter), replay 검사
+            if !is_replay_and_nonce_valid(&packet, &mut last_boot_id, &mut last_counter) {
+                esp_println::println!("패킷 유효성 검사 실패: 버전/카운터 오류");
                 continue;
             }
 
-            // 세션(boot_id) 변경 감지 시 카운터 리셋
-            if last_boot_id != Some(packet.boot_id) {
-                last_boot_id = Some(packet.boot_id);
-                last_counter = None;
-            }
-            if let Some(last) = last_counter {
-                if packet.counter <= last {
-                    esp_println::println!("리플레이 의심 - 차단");
-                    continue;
-                }
+            // 페어링이 끝난 뒤에는 저장된 peer만 허용
+            if has_paired_peer && !is_trusted_src {
+                esp_println::println!("미등록 MAC 패킷 차단: {:?}", src_addr);
+                continue;
             }
 
             match packet.payload_type {
                 PacketType::Handshake => {
                     if pending_pairing.is_some() || pending_sign.is_some() {
-                        esp_println::println!("이미 처리 중인 요청이 있습니다.");
-                        continue;
-                    }
-                    // 페어링 요청 화면 표시
-                    ui.display_pairing_request(None);
-                    pending_pairing = Some(PendingPairing {
-                        counter: packet.counter,
-                        boot_id: packet.boot_id,
-                    });
-                    last_counter = Some(packet.counter);
-                }
-                PacketType::SignRequest => {
-                    if packet.ciphertext_len as usize != 32 {
-                        esp_println::println!("페이로드 길이 오류 - 차단");
+                        esp_println::println!("현재 처리 중인 요청이 있어 Handshake 무시");
                         continue;
                     }
 
-                    // 복호화 (auth_tag가 0이면 평문으로 처리)
+                    if now_ms > pairing_deadline_ms {
+                        esp_println::println!("pairing window closed");
+                        continue;
+                    }
+
+                    if has_paired_peer {
+                        esp_println::println!("이미 페어링된 상태에서 Handshake 무시");
+                        continue;
+                    }
+
+                    if packet.ciphertext_len as usize != 0 {
+                        esp_println::println!("Handshake payload_len invalid");
+                        continue;
+                    }
+
+                    let hint = format_mac(&src_addr);
+                    ui.display_pairing_request(Some(hint.as_str()));
+                    pending_pairing = Some(PendingPairing {
+                        counter: packet.counter,
+                        boot_id: packet.boot_id,
+                        peer_mac: src_addr,
+                    });
+                }
+
+                PacketType::SignRequest => {
+                    if !is_valid_sign_request_packet(&packet) {
+                        esp_println::println!("SignRequest payload_len invalid");
+                        continue;
+                    }
+
+                    if !has_paired_peer {
+                        esp_println::println!("페어링 미완료 상태에서 SignRequest 무시");
+                        continue;
+                    }
+
+                    if pending_sign.is_some() {
+                        esp_println::println!("이미 서명 요청 처리 중");
+                        continue;
+                    }
+
                     let (payload_buf, payload_len) = match crypto::decrypt_payload(
                         packet.boot_id,
                         packet.counter,
                         &packet.ciphertext,
                         packet.ciphertext_len as usize,
+                        &aead_key,
                         &packet.auth_tag,
                     ) {
                         Some(v) => v,
                         None => {
-                            esp_println::println!("복호화 실패 - 차단");
+                            esp_println::println!("SignRequest 복호화 실패");
                             continue;
                         }
                     };
 
-                    last_counter = Some(packet.counter);
-
-                    if pending_sign.is_some() {
-                        // 이미 대기 중인 요청이 있으면 큐잉 없이 무시
-                        esp_println::println!("이전 서명 요청이 처리 중입니다.");
-                        continue;
-                    }
-
-                    // SignRequestPayload 우선 디코딩 시도
                     let payload =
-                        from_bytes::<SignRequestPayload>(&payload_buf[..payload_len]).ok();
-                    let hash = if let Some(p) = payload.as_ref() {
-                        ui.display_sign_request_intent(&p.intent, &p.hash);
-                        p.hash
-                    } else if payload_len == 32 {
-                        // 하위 호환: 해시만 온 경우
-                        let mut h = [0u8; 32];
-                        h.copy_from_slice(&payload_buf[..32]);
-                        ui.display_sign_request(&h);
-                        h
-                    } else {
-                        esp_println::println!("페이로드 디코딩 실패");
-                        continue;
-                    };
+                        match from_bytes::<SignRequestPayload>(&payload_buf[..payload_len]) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                esp_println::println!("SignRequest 형식 오류");
+                                continue;
+                            }
+                        };
 
-                    // 새 요청을 저장하고 버튼 입력을 기다림
+                    ui.display_sign_request_intent(&payload.intent, &payload.hash);
+
+                    let hash = payload.hash;
+
                     pending_sign = Some(PendingSign {
                         hash,
                         counter: packet.counter,
                         boot_id: packet.boot_id,
                     });
-                    esp_println::println!("서명 요청 대기 중 (버튼 입력 필요)");
+                    esp_println::println!("사용자 서명 승인 대기");
                 }
-                _ => {
-                    // 그 외 타입은 무시
+
+                PacketType::SignResponse | PacketType::ErrorMessage => {
+                    // Node A에서 수신할 필요가 없는 응답 타입
+                    esp_println::println!("응답 패킷 수신(필요 없음)");
                 }
             }
         }
@@ -349,24 +433,35 @@ fn main() -> ! {
 
 fn send_node_a_response(
     comm: &mut comm::CommManager<'_>,
+    dest_mac: [u8; 6],
+    aead_key: &[u8; 32],
     counter: u64,
     boot_id: u32,
     packet_type: PacketType,
     payload: &[u8],
 ) -> bool {
-    let (ciphertext, auth_tag) = match crypto::encrypt_payload(boot_id, counter, payload) {
+    let prev_peer = comm.peer_address();
+    comm.update_peer_address(dest_mac);
+
+    let (ciphertext, auth_tag) = match crypto::encrypt_payload(boot_id, counter, payload, aead_key)
+    {
         Some(v) => v,
-        None => return false,
+        None => {
+            comm.update_peer_address(prev_peer);
+            return false;
+        }
     };
 
     let Some(mut pkt) = SecurePacket::new(packet_type, &ciphertext[..payload.len()], auth_tag)
     else {
+        comm.update_peer_address(prev_peer);
         return false;
     };
 
     pkt.counter = counter;
     pkt.boot_id = boot_id;
 
-    // 응답 패킷을 전송하고, 전송 성공 여부만 상위 로직에 반환한다.
-    comm.send_packet(&pkt).is_ok()
+    let result = comm.send_packet(&pkt).is_ok();
+    comm.update_peer_address(prev_peer);
+    result
 }

@@ -1,6 +1,13 @@
-﻿use common::SecurePacket;
+use common::SecurePacket;
 use esp_wifi::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
 use postcard::{from_bytes, to_slice};
+
+#[derive(Clone, Copy)]
+pub struct PacketEnvelope {
+    pub packet: SecurePacket,
+    pub src_addr: [u8; 6],
+    pub trusted: bool,
+}
 
 pub struct CommManager<'a> {
     esp_now: EspNow<'a>,
@@ -10,13 +17,12 @@ pub struct CommManager<'a> {
 
 impl<'a> CommManager<'a> {
     pub fn new(mut esp_now: EspNow<'a>, node_b_mac: [u8; 6]) -> Self {
-        // ESP-NOW peer 정보를 등록한다.
+        // ESP-NOW peer 정보를 등록
         let _ = esp_now.add_peer(PeerInfo {
             interface: EspNowWifiInterface::Sta,
             peer_address: node_b_mac,
             lmk: None,
             channel: None,
-            // 기본 동작: 암호화를 사용하지 않는다.
             encrypt: false,
         });
 
@@ -24,6 +30,10 @@ impl<'a> CommManager<'a> {
             esp_now,
             peer_address: node_b_mac,
         }
+    }
+
+    pub fn peer_address(&self) -> [u8; 6] {
+        self.peer_address
     }
 
     pub fn update_peer_address(&mut self, peer_address: [u8; 6]) {
@@ -45,28 +55,34 @@ impl<'a> CommManager<'a> {
         Ok(())
     }
 
-    pub fn receive_packet(&self) -> Option<SecurePacket> {
+    pub fn receive_packet_with_src(&self) -> Option<PacketEnvelope> {
         if let Some(data) = self.esp_now.receive() {
-            // 등록된 Node B에서 온 패킷만 처리한다.
-            if data.info.src_addr != self.peer_address {
-                esp_println::println!(
-                    "알 수 없는 기기(MAC: {:?}) 패킷 감지 - 차단됨",
-                    data.info.src_addr
-                );
+            let len = data.len as usize;
+
+            if len == 0 || len > data.data.len() {
                 return None;
             }
 
-            // 실제 수신된 길이만 역직렬화 (패딩은 제외).
-            let raw_data = &data.data[..data.len as usize];
-            match from_bytes::<SecurePacket>(raw_data) {
-                Ok(packet) => Some(packet),
-                Err(_) => {
-                    esp_println::println!("패킷 역직렬화 실패");
-                    None
-                }
-            }
+            let src_addr = data.info.src_addr;
+            let raw_data = &data.data[..len];
+            let packet = match from_bytes::<SecurePacket>(raw_data) {
+                Ok(packet) => packet,
+                Err(_) => return None,
+            };
+
+            Some(PacketEnvelope {
+                packet,
+                src_addr,
+                trusted: src_addr == self.peer_address,
+            })
         } else {
             None
         }
+    }
+
+    pub fn receive_packet(&self) -> Option<SecurePacket> {
+        self.receive_packet_with_src()
+            .filter(|env| env.trusted)
+            .map(|env| env.packet)
     }
 }

@@ -1312,9 +1312,12 @@ version = "0.1.0"
 dependencies = [
  "common",
  "embedded-io 0.7.1",
+ "embedded-storage",
  "esp-backtrace",
  "esp-hal",
+ "esp-partition-table",
  "esp-println",
+ "esp-storage",
  "esp-wifi",
  "postcard",
 ]

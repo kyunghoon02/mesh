@@ -58,7 +58,7 @@ pub async fn init_db(url: &str) -> Option<Arc<PgClient>> {
 pub async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Value>, String> {
     let row = db
         .query_opt(
-            "SELECT chain_id, mode, sca_address, factory_address, rpc_url, supports_passkey, status, updated_at \
+            "SELECT chain_id, mode, sca_address, factory_address, rpc_url, supports_passkey, status, updated_at::TEXT \
              FROM chain_registry WHERE chain_id = $1",
             &[&(chain_id as i64)],
         )
@@ -79,7 +79,7 @@ pub async fn get_chain_config(db: &PgClient, chain_id: u64) -> Result<Option<Val
         // 패스키 지원 체인에서만 Passkey 복구 허용
         "supports_passkey": row.get::<_, bool>(5),
         "status": row.get::<_, String>(6),
-        "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(7).to_rfc3339(),
+        "updated_at": row.get::<_, String>(7),
     })))
 }
 
@@ -155,7 +155,7 @@ pub async fn get_passkey(
 ) -> Result<Option<Value>, String> {
     let row = db
         .query_opt(
-            "SELECT owner, chain_id, passkey_pubkey, credential_id, rp_id, updated_at \
+            "SELECT owner, chain_id, passkey_pubkey, credential_id, rp_id, updated_at::TEXT \
              FROM passkey_registry WHERE owner = $1 AND chain_id = $2",
             &[&owner, &(chain_id as i64)],
         )
@@ -173,6 +173,6 @@ pub async fn get_passkey(
         "passkey_pubkey": row.get::<_, String>(2),
         "credential_id": row.get::<_, Option<String>>(3),
         "rp_id": row.get::<_, Option<String>>(4),
-        "updated_at": row.get::<_, chrono::DateTime<chrono::Utc>>(5).to_rfc3339(),
+        "updated_at": row.get::<_, String>(5),
     })))
 }

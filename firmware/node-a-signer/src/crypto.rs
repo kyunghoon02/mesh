@@ -1,4 +1,4 @@
-﻿use chacha20poly1305::{
+use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{AeadInPlace, KeyInit},
 };
@@ -7,8 +7,6 @@ use k256::SecretKey;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{RecoveryId, SigningKey, VerifyingKey};
 use sha3::{Digest, Keccak256};
-
-const AEAD_KEY_BYTES: [u8; 32] = [0u8; 32];
 
 pub struct KeyManager {
     pub secret_key: SecretKey,
@@ -69,6 +67,27 @@ impl KeyManager {
         out[64] = recovery_id.to_byte() + 27;
         Some(out)
     }
+
+    /// 개인키에서 AEAD 키를 파생한다.
+    pub fn derive_aead_key(secret_key: &SecretKey) -> [u8; 32] {
+        let mut hasher = Keccak256::new();
+        hasher.update(secret_key.to_bytes());
+        let hash = hasher.finalize();
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&hash);
+        key
+    }
+
+    pub fn derive_aead_key_from_address(address: &[u8; 20]) -> [u8; 32] {
+        let mut hasher = Keccak256::new();
+        hasher.update(address);
+        let hash = hasher.finalize();
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&hash);
+        key
+    }
 }
 
 /// SecurePacket 페이로드를 ChaCha20-Poly1305로 복호화한다.
@@ -78,6 +97,7 @@ pub fn decrypt_payload(
     counter: u64,
     ciphertext: &[u8; 192],
     ciphertext_len: usize,
+    aead_key: &[u8; 32],
     auth_tag: &[u8; 16],
 ) -> Option<([u8; 192], usize)> {
     if ciphertext_len > 192 {
@@ -91,7 +111,7 @@ pub fn decrypt_payload(
         return None;
     }
 
-    let key = Key::from_slice(&AEAD_KEY_BYTES);
+    let key = Key::from_slice(aead_key);
     let cipher = ChaCha20Poly1305::new(key);
     let nonce = build_nonce(boot_id, counter);
 
@@ -106,11 +126,16 @@ pub fn decrypt_payload(
 }
 
 /// 서명해시를 암호화해 ESP-NOW 송신용 payload를 구성한다.
-pub fn encrypt_hash(boot_id: u32, counter: u64, hash32: &[u8; 32]) -> ([u8; 32], [u8; 16]) {
+pub fn encrypt_hash(
+    boot_id: u32,
+    counter: u64,
+    hash32: &[u8; 32],
+    aead_key: &[u8; 32],
+) -> ([u8; 32], [u8; 16]) {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(hash32);
 
-    let key = Key::from_slice(&AEAD_KEY_BYTES);
+    let key = Key::from_slice(aead_key);
     let cipher = ChaCha20Poly1305::new(key);
     let nonce = build_nonce(boot_id, counter);
 
@@ -125,6 +150,7 @@ pub fn encrypt_payload(
     boot_id: u32,
     counter: u64,
     plaintext: &[u8],
+    aead_key: &[u8; 32],
 ) -> Option<([u8; 192], [u8; 16])> {
     if plaintext.len() > 192 {
         return None;
@@ -133,7 +159,7 @@ pub fn encrypt_payload(
     let mut buf = [0u8; 192];
     buf[..plaintext.len()].copy_from_slice(plaintext);
 
-    let key = Key::from_slice(&AEAD_KEY_BYTES);
+    let key = Key::from_slice(aead_key);
     let cipher = ChaCha20Poly1305::new(key);
     let nonce = build_nonce(boot_id, counter);
     let tag = cipher

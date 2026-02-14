@@ -8,6 +8,19 @@ function toHex(bytes: Uint8Array): string {
     .join("")}`;
 }
 
+function fromBase64Url(base64url: string): Uint8Array {
+  const padded = base64url
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(base64url.length + ((4 - (base64url.length % 4)) % 4), "=");
+  const decoded = atob(padded);
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i += 1) {
+    bytes[i] = decoded.charCodeAt(i);
+  }
+  return bytes;
+}
+
 function toUint8(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -127,4 +140,64 @@ export async function registerPasskey(options?: {
   const rawKey = extractPublicKeyFromAuthData(authData);
 
   return { publicKeyHex: toHex(rawKey), credentialId, rpId };
+}
+
+export async function signWithPasskey(options: {
+  rpId?: string;
+  challenge: Uint8Array;
+  credentialId?: string;
+  userVerification?: "required" | "preferred" | "discouraged";
+  timeout?: number;
+}): Promise<{
+  authenticatorDataHex: string;
+  clientDataJSONHex: string;
+  signatureHex: string;
+  credentialId?: string;
+}> {
+  if (!window.PublicKeyCredential || !navigator.credentials?.get) {
+    throw new Error("WebAuthn is not supported in this browser.");
+  }
+
+  const allowCredentials = options.credentialId
+    ? [
+        {
+          id: fromBase64Url(options.credentialId),
+          type: "public-key"
+        } as PublicKeyCredentialDescriptor
+      ]
+    : undefined;
+
+  const assertion = (await navigator.credentials.get({
+    publicKey: {
+      challenge: options.challenge.buffer.slice(
+        options.challenge.byteOffset,
+        options.challenge.byteOffset + options.challenge.byteLength
+      ) as ArrayBuffer,
+      rpId: options.rpId ?? window.location.hostname,
+      allowCredentials,
+      userVerification: options.userVerification ?? "preferred",
+      timeout: options.timeout ?? 60_000
+    }
+  })) as PublicKeyCredential;
+
+  if (!assertion) {
+    throw new Error("Passkey assertion cancelled");
+  }
+
+  const response = assertion.response as AuthenticatorAssertionResponse;
+  const authData = new Uint8Array(response.authenticatorData);
+  const clientData = new Uint8Array(response.clientDataJSON);
+  const signature = new Uint8Array(response.signature);
+
+  return {
+    authenticatorDataHex: toHex(authData),
+    clientDataJSONHex: toHex(clientData),
+    signatureHex: toHex(signature),
+    credentialId: toBase64Url(new Uint8Array(assertion.rawId))
+  };
+}
+
+export function makeRecoveryChallenge(args: { owner: string; newOwner: string; chainId: number }): Uint8Array {
+  const message = `mesh-recover:${args.chainId}:${args.owner.toLowerCase()}:${args.newOwner.toLowerCase()}`;
+  return new TextEncoder().encode(message);
 }
