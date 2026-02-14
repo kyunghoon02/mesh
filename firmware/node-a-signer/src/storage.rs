@@ -1,10 +1,10 @@
-﻿use esp_storage::FlashStorage;
-use embedded_storage::{ReadStorage, Storage};
+﻿use embedded_storage::{ReadStorage, Storage};
 use esp_partition_table::PartitionTable;
+use esp_storage::FlashStorage;
 
 const MAGIC_BYTE: u8 = 0xA5;
 const MAGIC_MAC: u8 = 0xB1;
-const SLOT_SIZE: usize = 64; // 헤더(37B) + 패딩
+const SLOT_SIZE: usize = 64; // 슬롯 크기(헤더 5B + 데이터)
 
 pub struct StorageManager {
     flash: FlashStorage,
@@ -42,7 +42,7 @@ impl StorageManager {
                 continue;
             }
 
-            // 빈 슬롯은 보통 0xFF
+            // 0xFF는 미사용 슬롯
             if buf[0] == 0xFF {
                 continue;
             }
@@ -100,7 +100,7 @@ impl StorageManager {
     pub fn save_key(&mut self, key: &[u8; 32]) -> Result<(), ()> {
         let (slot_count, base) = self.slot_info();
 
-        // 마지막 슬롯/카운터 스캔
+        // 저장 위치를 찾는다: 비어있는 슬롯 우선, 없으면 가장 오래된 슬롯 갱신
         let mut best_idx: Option<usize> = None;
         let mut best_counter: Option<u32> = None;
         let mut first_empty: Option<usize> = None;
@@ -133,7 +133,7 @@ impl StorageManager {
         } else {
             let next = best_idx.map(|i| i + 1).unwrap_or(0);
             if next >= slot_count {
-                // 파티션 전체 erase 후 처음 슬롯 사용
+                // 슬롯이 모두 채워져 있으면 전체 파티션을 지우고 첫 슬롯부터 다시 사용
                 self.erase_partition()?;
                 0
             } else {
@@ -155,6 +155,7 @@ impl StorageManager {
     pub fn save_peer_mac(&mut self, mac: &[u8; 6]) -> Result<(), ()> {
         let (slot_count, base) = self.slot_info();
 
+        // MAC 저장도 동일 정책(빈 슬롯 우선, 이후 순환 + 롤오버)으로 관리한다.
         let mut best_idx: Option<usize> = None;
         let mut best_counter: Option<u32> = None;
         let mut first_empty: Option<usize> = None;
@@ -211,7 +212,7 @@ impl StorageManager {
     }
 
     fn erase_partition(&mut self) -> Result<(), ()> {
-        // 파티션 크기 기반 erase (섹터 단위 정렬 필요)
+        // 저장소 전체를 초기화해서 슬롯을 재사용 가능한 상태로 만든다.
         self.flash
             .erase(self.nvs_offset, self.nvs_offset + self.nvs_size)
             .map_err(|_| ())

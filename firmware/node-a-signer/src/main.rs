@@ -1,36 +1,36 @@
-﻿#![no_std]
+#![no_std]
 #![no_main]
 
+mod comm;
 mod crypto;
 mod storage;
 mod ui;
-mod comm;
 
+use common::{PacketType, SecurePacket, SignRequestPayload};
 use core::cell::RefCell;
 use core::fmt::Write;
 use critical_section::Mutex;
-use common::{PacketType, SecurePacket, SignRequestPayload};
+use embedded_graphics::pixelcolor::Rgb565;
 use esp_backtrace as _;
 use esp_hal::{
     clock::ClockControl,
     delay::Delay,
-    gpio::{AnyPin, Input, PullUp, IO, Output, Level},
+    gpio::{AnyPin, IO, Input, Level, Output, PullUp},
     peripherals::Peripherals,
     prelude::*,
     rng::Rng,
     systimer::SystemTimer,
     timer::timg::TimerGroup,
 };
-use esp_wifi::{esp_now::EspNow, initialize, EspWifiInitFor};
-use embedded_graphics::pixelcolor::Rgb565;
+use esp_wifi::{EspWifiInitFor, esp_now::EspNow, initialize};
 use heapless::String;
-use postcard::from_bytes;
 use mipidsi::{
     Builder,
+    interface::{Generic8BitBus, ParallelInterface},
     models::ST7789,
-    interface::{ParallelInterface, Generic8BitBus},
     options::{ColorOrder, Orientation, Rotation},
 };
+use postcard::from_bytes;
 
 // 디스플레이 해상도 (T-Display S3 기준)
 const DISPLAY_WIDTH: u16 = 170;
@@ -202,43 +202,47 @@ fn main() -> ! {
                 if duration >= LONG_PRESS_MS {
                     esp_println::println!("길게 누름 감지 (거절)");
                     if let Some(pair) = pending_pairing.take() {
-                        if let Some(mut resp) =
-                            SecurePacket::new(PacketType::ErrorMessage, b"DENY", [0u8; 16])
-                        {
-                            resp.counter = pair.counter;
-                            resp.boot_id = pair.boot_id;
-                            let _ = comm.send_packet(&resp);
+                        if send_node_a_response(
+                            &mut comm,
+                            pair.counter,
+                            pair.boot_id,
+                            PacketType::ErrorMessage,
+                            b"DENY",
+                        ) {
+                            ui.display_message("페어링 거절", "요청을 거절했습니다", "");
                         }
-                        ui.display_message("페어링 거절", "요청을 거절했습니다", "");
                     } else if let Some(pending) = pending_sign.take() {
-                        if let Some(mut resp) =
-                            SecurePacket::new(PacketType::ErrorMessage, b"DENY", [0u8; 16])
-                        {
-                            resp.counter = pending.counter;
-                            resp.boot_id = pending.boot_id;
-                            let _ = comm.send_packet(&resp);
+                        if send_node_a_response(
+                            &mut comm,
+                            pending.counter,
+                            pending.boot_id,
+                            PacketType::ErrorMessage,
+                            b"DENY",
+                        ) {
+                            ui.display_message("서명 거절", "요청을 거절했습니다", "");
                         }
-                        ui.display_message("서명 거절", "요청을 거절했습니다", "");
                     }
                 } else if duration >= MIN_PRESS_MS {
                     esp_println::println!("짧게 누름 감지 (승인)");
                     if let Some(pair) = pending_pairing.take() {
-                        if let Some(mut resp) =
-                            SecurePacket::new(PacketType::Handshake, b"OK", [0u8; 16])
-                        {
-                            resp.counter = pair.counter;
-                            resp.boot_id = pair.boot_id;
-                            let _ = comm.send_packet(&resp);
+                        if send_node_a_response(
+                            &mut comm,
+                            pair.counter,
+                            pair.boot_id,
+                            PacketType::Handshake,
+                            b"OK",
+                        ) {
+                            ui.display_message("페어링 승인", "연결을 허용했습니다", "");
                         }
-                        ui.display_message("페어링 승인", "연결을 허용했습니다", "");
                     } else if let Some(pending) = pending_sign.take() {
                         if let Some(sig) = km.sign_hash(&pending.hash) {
-                            if let Some(mut resp) =
-                                SecurePacket::new(PacketType::SignResponse, &sig, [0u8; 16])
-                            {
-                                resp.counter = pending.counter;
-                                resp.boot_id = pending.boot_id;
-                                let _ = comm.send_packet(&resp);
+                            if send_node_a_response(
+                                &mut comm,
+                                pending.counter,
+                                pending.boot_id,
+                                PacketType::SignResponse,
+                                &sig,
+                            ) {
                                 ui.display_message("서명 완료", "승인 결과를 전송했습니다", "");
                             }
                         }
@@ -311,7 +315,8 @@ fn main() -> ! {
                     }
 
                     // SignRequestPayload 우선 디코딩 시도
-                    let payload = from_bytes::<SignRequestPayload>(&payload_buf[..payload_len]).ok();
+                    let payload =
+                        from_bytes::<SignRequestPayload>(&payload_buf[..payload_len]).ok();
                     let hash = if let Some(p) = payload.as_ref() {
                         ui.display_sign_request_intent(&p.intent, &p.hash);
                         p.hash
@@ -340,4 +345,28 @@ fn main() -> ! {
             }
         }
     }
+}
+
+fn send_node_a_response(
+    comm: &mut comm::CommManager<'_>,
+    counter: u64,
+    boot_id: u32,
+    packet_type: PacketType,
+    payload: &[u8],
+) -> bool {
+    let (ciphertext, auth_tag) = match crypto::encrypt_payload(boot_id, counter, payload) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let Some(mut pkt) = SecurePacket::new(packet_type, &ciphertext[..payload.len()], auth_tag)
+    else {
+        return false;
+    };
+
+    pkt.counter = counter;
+    pkt.boot_id = boot_id;
+
+    // 응답 패킷을 전송하고, 전송 성공 여부만 상위 로직에 반환한다.
+    comm.send_packet(&pkt).is_ok()
 }

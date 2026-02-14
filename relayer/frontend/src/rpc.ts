@@ -72,6 +72,8 @@ export type PrepareDeployResult = {
 export type ConfirmDeployResult = {
   chain_id: number;
   status: "active" | "failed" | "pending";
+  sca_address?: string | null;
+  factory_address?: string | null;
 };
 
 export type PasskeyRecord = {

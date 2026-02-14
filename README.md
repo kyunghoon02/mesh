@@ -77,3 +77,27 @@ mesh/
 - `mesh_confirmDeploy`: 배포 트랜잭션 상태 확인 및 체인 레지스트리 갱신
 - `mesh_getChainConfig`: 체인별 모드/주소 조회
 - `mesh_setChainConfig`: 체인별 모드/주소 설정
+
+## E2E 연동 점검
+
+아래 스크립트를 통해 연동 점검을 수행합니다.
+
+`scripts/e2e_nodeb_relayer_check.ps1`
+
+- 요청: `mesh_getStatus` (반복)
+  - 동작: `SERIAL` 상태 조회 요청을 반복 전송
+  - 기대 결과: 상태 값이 연속적으로 응답되고, 요청 ID/시퀀스가 일관되게 증가
+
+- 요청: `eth_chainId`
+  - 동작: 현재 연결 체인 ID 조회
+  - 기대 결과: 체인 ID(hex string) 반환
+
+- 요청: `mesh_getChainConfig`
+  - 동작: 체인별 저장 설정 조회
+  - 기대 결과: `chain_id / mode / factory_address / rpc_url / sca_address / status` 반환
+
+- 요청: `eth_sendTransaction` 또는 `eth_call` dry-run
+  - 동작: 하드웨어 경유 트랜잭션을 시뮬레이션
+  - 기대 결과: 하드웨어 승인 경로(설정) 또는 업스트림 에러 코드가 명확하게 반환
+
+실 하드웨어(Node A, Node B)가 있어야 `mesh_getStatus` 및 하드웨어 경유 트랜잭션 플로우를 완전히 점검할 수 있습니다.

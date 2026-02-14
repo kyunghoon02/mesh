@@ -255,6 +255,12 @@ function App() {
         }
       ]);
 
+      if (result.sca_address) {
+        setPredictedAddress(result.sca_address);
+      }
+      if (result.factory_address) {
+        setFactory(result.factory_address);
+      }
       appendLog(`mesh_confirmDeploy status: ${result.status}`);
       if (result.status === "active") {
         setViewState("active");

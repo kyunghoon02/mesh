@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 
 use heapless::String;
 use serde::{Deserialize, Serialize};
@@ -20,13 +20,13 @@ pub enum PacketType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SecurePacket {
     pub version: u8,
-    pub boot_id: u32,          // Session ID (reset on reboot)
-    pub counter: u64,          // Anti-replay counter
+    pub boot_id: u32, // Session ID (reset on reboot)
+    pub counter: u64, // Anti-replay counter
     pub payload_type: PacketType,
-    pub ciphertext_len: u8,    // 0..=192
+    pub ciphertext_len: u8, // 0..=192
     #[serde(with = "BigArray")]
     pub ciphertext: [u8; 192], // ESP-NOW 250-byte limit (with padding)
-    pub auth_tag: [u8; 16],    // AEAD authentication tag
+    pub auth_tag: [u8; 16], // AEAD authentication tag
 }
 
 impl SecurePacket {
@@ -59,7 +59,8 @@ pub struct TransactionIntent {
     pub summary: String<64>,
 }
 
-/// ?쒕챸 ?붿껌 ?섏씠濡쒕뱶 (?댁떆 + ?ъ슜???섎룄)
+/// 서명 요청(SignRequest) 페이로드 구조
+/// 노드간 검증 가능한 메시지를 전달하기 위한 공용 형식.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SignRequestPayload {
     pub hash: [u8; 32],

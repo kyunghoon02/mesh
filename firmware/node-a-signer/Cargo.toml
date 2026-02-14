@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "=1.0.0-rc.0", features = ["esp32s3", "unstable"] }
 esp-wifi = { version = "0.15.1", features = ["esp32s3", "wifi", "esp-now"] }
-esp-storage = { version = "0.8.1", features = ["esp32s3"] }
+esp-storage = { version = "0.7.0" }
 embedded-storage = "0.3.1"
 esp-partition-table = "0.1.0"
+esp-backtrace = { version = "0.18.1", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+], default-features = false }
+esp-println = { version = "0.16.1", features = ["esp32s3"] }
+critical-section = "1.2.0"
 # 암호화/서명
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 sha3 = { version = "0.10", default-features = false }

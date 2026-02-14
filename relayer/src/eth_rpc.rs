@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::abi::parse_chain_id_str;
 
@@ -15,11 +15,11 @@ pub async fn fetch_chain_id(client: &reqwest::Client, upstream: &str) -> Option<
     parse_chain_id_str(result)
 }
 
-pub async fn fetch_tx_receipt_status(
+pub async fn fetch_tx_receipt(
     client: &reqwest::Client,
     upstream: &str,
     tx_hash: &str,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<Value>, String> {
     if upstream.is_empty() {
         return Err("UPSTREAM_RPC not configured".to_string());
     }
@@ -40,17 +40,23 @@ pub async fn fetch_tx_receipt_status(
     if result.is_none() || result == Some(&Value::Null) {
         return Ok(None);
     }
-    let status = result
-        .and_then(|r| r.get("status"))
+
+    Ok(result.cloned())
+}
+
+pub fn parse_receipt_status(receipt: &Value) -> Result<bool, String> {
+    let status = receipt
+        .get("status")
         .and_then(|s| s.as_str())
         .ok_or_else(|| "missing receipt status".to_string())?;
     let ok = match status {
         "0x1" => true,
         "0x0" => false,
         other => {
-            let v = parse_chain_id_str(other).ok_or_else(|| "invalid receipt status".to_string())?;
+            let v =
+                parse_chain_id_str(other).ok_or_else(|| "invalid receipt status".to_string())?;
             v == 1
         }
     };
-    Ok(Some(ok))
+    Ok(ok)
 }

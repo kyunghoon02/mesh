@@ -1,9 +1,9 @@
 use std::sync::{
-    atomic::{AtomicU32, AtomicU64},
     Arc,
+    atomic::{AtomicU32, AtomicU64},
 };
 
-use axum::{routing::post, Router};
+use axum::{Router, routing::post};
 use reqwest::Client;
 use tokio_postgres::Client as PgClient;
 use tracing::{info, warn};
@@ -52,9 +52,7 @@ impl ApprovalMode {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     // .env 파일이 있으면 로드
     dotenvy::dotenv().ok();
@@ -127,7 +125,9 @@ async fn main() {
         client,
     });
 
-    let app = Router::new().route("/", post(rpc::rpc_handler)).with_state(state);
+    let app = Router::new()
+        .route("/", post(rpc::rpc_handler))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-hal = { version = "=1.0.0-rc.0", features = ["esp32c3", "unstable"] }
 esp-wifi = { version = "0.15.1", features = ["esp32c3", "wifi", "esp-now"] }
 esp-backtrace = { version = "0.18.1", features = [
     "esp32c3",
     "panic-handler",
     "println",
 ], default-features = false }
+esp-println = { version = "0.16.1", features = ["esp32c3"] }
 embedded-io = "0.7.1"
 postcard = { version = "1.0", default-features = false }
 common = { path = "../../common" }

@@ -1,15 +1,15 @@
-﻿use std::sync::Arc;
 use core::fmt::Write;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::{
+    Json,
     body::Bytes,
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha3::{Digest, Keccak256};
 use tracing::{error, info, warn};
 
@@ -17,11 +17,11 @@ use common::{PacketType, SecurePacket, SignRequestPayload, TransactionIntent};
 use heapless::String as HString;
 
 use crate::abi::{
-    address_to_hex, encode_create_account, encode_get_address, parse_address, parse_bytes32,
-    parse_hex_bytes, parse_abi_address, to_hex,
+    address_to_hex, encode_create_account, encode_get_address, parse_abi_address, parse_address,
+    parse_bytes32, parse_hex_bytes, to_hex,
 };
 use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
-use crate::eth_rpc::fetch_tx_receipt_status;
+use crate::eth_rpc::{fetch_tx_receipt, parse_receipt_status};
 use crate::{AppState, ApprovalMode};
 
 pub async fn rpc_handler(
@@ -62,7 +62,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     let has_id = obj.contains_key("id");
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
 
-    // ?뚮┝ ?붿껌? ?묐떟?섏? ?딆쓬
+    // id가 없거나 null이면 JSON-RPC 요청 자체를 무시한다.
     if !has_id || id.is_null() {
         return None;
     }
@@ -80,7 +80,8 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
 
     if method == "mesh_getStatus" {
         if let Some(serial) = &state.serial {
-            match serial.get_status().await {
+            let seq = state.seq.fetch_add(1, Ordering::Relaxed);
+            match serial.get_status(seq).await {
                 Ok(status) => {
                     return Some(json!({"jsonrpc":"2.0","id":id,"result": status}));
                 }
@@ -139,7 +140,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }
     }
 
-    // 洹???RPC???낆뒪?몃┝?쇰줈 ?꾨떖
+    // 업스트림 RPC가 없으면 에러로 반환하고 요청을 더 이상 처리하지 않는다.
     let upstream = resolve_upstream(state, req).await;
     if upstream.is_empty() {
         return Some(json!({
@@ -149,13 +150,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }));
     }
 
-    match state
-        .client
-        .post(&upstream)
-        .json(req)
-        .send()
-        .await
-    {
+    match state.client.post(&upstream).json(req).send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(v) => Some(v),
             Err(e) => {
@@ -194,10 +189,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(parse_address);
 
     let passkey = first
-        .and_then(|m| {
-            m.get("passkey_pubkey")
-                .or_else(|| m.get("passkeyPubkey"))
-        })
+        .and_then(|m| m.get("passkey_pubkey").or_else(|| m.get("passkeyPubkey")))
         .and_then(|v| v.as_str())
         .and_then(parse_hex_bytes);
 
@@ -235,7 +227,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "invalid owner"}
-            })
+            });
         }
     };
 
@@ -248,7 +240,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
                     "jsonrpc":"2.0",
                     "id": id,
                     "error": {"code": -32602, "message": "invalid passkey_pubkey"}
-                })
+                });
             }
         }
     } else {
@@ -263,7 +255,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing factory address"}
-            })
+            });
         }
     };
     if parse_address(&factory).is_none() {
@@ -339,7 +331,7 @@ async fn handle_get_chain_config(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing chain_id"}
-            })
+            });
         }
     };
 
@@ -350,7 +342,7 @@ async fn handle_get_chain_config(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32020, "message": "DATABASE_URL not configured"}
-            })
+            });
         }
     };
 
@@ -390,7 +382,7 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing chain_id"}
-            })
+            });
         }
     };
 
@@ -413,7 +405,10 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
 
     // UI에서 저장한 체인별 패스키 지원 플래그
     let supports_passkey = first
-        .and_then(|m| m.get("supports_passkey").or_else(|| m.get("supportsPasskey")))
+        .and_then(|m| {
+            m.get("supports_passkey")
+                .or_else(|| m.get("supportsPasskey"))
+        })
         .and_then(|v| v.as_bool());
 
     let status = first
@@ -429,7 +424,7 @@ async fn handle_set_chain_config(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32020, "message": "DATABASE_URL not configured"}
-            })
+            });
         }
     };
 
@@ -503,10 +498,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
         .or(state.chain_id);
 
     let passkey_hex = first
-        .and_then(|m| {
-            m.get("passkey_pubkey")
-                .or_else(|| m.get("passkeyPubkey"))
-        })
+        .and_then(|m| m.get("passkey_pubkey").or_else(|| m.get("passkeyPubkey")))
         .and_then(|v| v.as_str());
 
     let credential_id = first
@@ -526,7 +518,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "invalid owner"}
-            })
+            });
         }
     };
 
@@ -537,7 +529,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing chain_id"}
-            })
+            });
         }
     };
 
@@ -548,7 +540,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "invalid passkey_pubkey"}
-            })
+            });
         }
     };
 
@@ -559,7 +551,7 @@ async fn handle_set_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32020, "message": "DATABASE_URL not configured"}
-            })
+            });
         }
     };
 
@@ -614,7 +606,7 @@ async fn handle_get_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "invalid owner"}
-            })
+            });
         }
     };
 
@@ -625,7 +617,7 @@ async fn handle_get_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing chain_id"}
-            })
+            });
         }
     };
 
@@ -636,7 +628,7 @@ async fn handle_get_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32020, "message": "DATABASE_URL not configured"}
-            })
+            });
         }
     };
 
@@ -688,7 +680,7 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing chain_id"}
-            })
+            });
         }
     };
 
@@ -699,26 +691,51 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32602, "message": "missing tx_hash"}
-            })
+            });
         }
     };
 
     let upstream = resolve_upstream(state, req).await;
-    let status = match fetch_tx_receipt_status(&state.client, &upstream, tx_hash).await {
-        Ok(Some(true)) => "active",
-        Ok(Some(false)) => "failed",
-        Ok(None) => "pending",
+    let receipt = match fetch_tx_receipt(&state.client, &upstream, tx_hash).await {
+        Ok(v) => v,
         Err(e) => {
             return json!({
                 "jsonrpc":"2.0",
                 "id": id,
                 "error": {"code": -32030, "message": e}
-            })
+            });
         }
+    };
+
+    let status = match receipt.as_ref() {
+        None => "pending",
+        Some(r) => match parse_receipt_status(r) {
+            Ok(true) => "active",
+            Ok(false) => "failed",
+            Err(e) => {
+                return json!({
+                    "jsonrpc":"2.0",
+                    "id": id,
+                    "error": {"code": -32030, "message": e}
+                });
+            }
+        },
     };
 
     if status != "pending" {
         if let Some(db) = &state.db {
+            let receipt_factory = receipt.as_ref().and_then(extract_receipt_to_address);
+            let resolved_factory = factory_address.clone().or(receipt_factory.clone());
+
+            let receipt_sca = receipt
+                .as_ref()
+                .and_then(|r| {
+                    extract_sca_from_account_created_event(r, resolved_factory.as_deref())
+                })
+                .or_else(|| receipt.as_ref().and_then(extract_receipt_contract_address));
+
+            let resolved_sca = sca_address.clone().or(receipt_sca.clone());
+
             let mut supports_passkey = false;
             if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
                 supports_passkey = cfg
@@ -730,13 +747,20 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 db,
                 chain_id,
                 "SCA",
-                sca_address,
-                factory_address,
+                resolved_sca.clone(),
+                resolved_factory.clone(),
                 None,
                 supports_passkey,
                 status.to_string(),
             )
             .await;
+
+            if let Some(factory) = resolved_factory {
+                info!("mesh_confirmDeploy factory resolved: {}", factory);
+            }
+            if let Some(sca) = resolved_sca {
+                info!("mesh_confirmDeploy sca resolved: {}", sca);
+            }
         }
     }
 
@@ -745,7 +769,18 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
         "id": id,
         "result": {
             "chain_id": chain_id,
-            "status": status
+            "status": status,
+            "sca_address": receipt
+                .as_ref()
+                .and_then(|r| {
+                    sca_address
+                        .clone()
+                        .or_else(|| extract_sca_from_account_created_event(r, factory_address.as_deref()))
+                        .or_else(|| extract_receipt_contract_address(r))
+                }),
+            "factory_address": receipt
+                .as_ref()
+                .and_then(|r| factory_address.clone().or_else(|| extract_receipt_to_address(r)))
         }
     })
 }
@@ -771,7 +806,8 @@ async fn send_sign_request_if_possible(
         }
     };
 
-    // SecurePacket ?앹꽦 (?뷀샇?붾뒗 異뷀썑 援ы쁽, ?꾩옱???섏씠濡쒕뱶??異뺤빟 ?곗씠?곕쭔 ?댁쓬)
+    // SecurePacket 생성: 서명 요청 바디가 잘못되어도 안전하게 실패 처리하며
+    // 하드웨어 요청 전까지 동일 파이프라인을 유지한다.
     let counter = state.counter.fetch_add(1, Ordering::Relaxed);
     let packet = build_secure_packet(method, req, counter);
 
@@ -852,8 +888,8 @@ fn build_secure_packet(method: &str, req: &Value, counter: u64) -> SecurePacket 
 
 fn encrypt_payload(boot_id: u32, counter: u64, plain: &[u8]) -> ([u8; 192], [u8; 16]) {
     use chacha20poly1305::{
+        ChaCha20Poly1305, Key,
         aead::{AeadInPlace, KeyInit},
-        ChaCha20Poly1305, Key, Nonce,
     };
 
     let mut buf = [0u8; 192];
@@ -885,7 +921,7 @@ fn build_intent(method: &str, req: &Value) -> TransactionIntent {
     let chain_id = extract_chain_id(req).unwrap_or(0);
     let mut target_address = [0u8; 20];
     let mut eth_value = 0u128;
-    let mut risk_level = 0u8;
+    let risk_level: u8;
     let mut summary: HString<64> = HString::new();
 
     if method == "eth_sendTransaction" {
@@ -990,12 +1026,12 @@ fn parse_chain_id_value(v: &Value) -> Option<u64> {
 }
 
 fn extract_chain_id(req: &Value) -> Option<u64> {
-  let params = req.get("params")?.as_array()?;
-  let first = params.get(0)?;
-  if let Some(obj) = first.as_object() {
-    return obj.get("chain_id").and_then(parse_chain_id_value);
-  }
-  None
+    let params = req.get("params")?.as_array()?;
+    let first = params.get(0)?;
+    if let Some(obj) = first.as_object() {
+        return obj.get("chain_id").and_then(parse_chain_id_value);
+    }
+    None
 }
 
 fn compute_default_salt(owner: [u8; 20], passkey: &[u8], chain_id: u64) -> [u8; 32] {
@@ -1008,6 +1044,84 @@ fn compute_default_salt(owner: [u8; 20], passkey: &[u8], chain_id: u64) -> [u8; 
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
     out
+}
+
+fn normalize_address_str(addr: &str) -> Option<String> {
+    parse_address(addr).map(address_to_hex)
+}
+
+fn extract_receipt_to_address(receipt: &Value) -> Option<String> {
+    receipt
+        .get("to")
+        .and_then(|v| v.as_str())
+        .and_then(normalize_address_str)
+}
+
+fn extract_receipt_contract_address(receipt: &Value) -> Option<String> {
+    receipt
+        .get("contractAddress")
+        .and_then(|v| v.as_str())
+        .and_then(normalize_address_str)
+}
+
+fn extract_sca_from_account_created_event(
+    receipt: &Value,
+    factory_hint: Option<&str>,
+) -> Option<String> {
+    // MeshVaultFactory.AccountCreated(address,address,bytes32)
+    let event_topic = format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(
+            b"AccountCreated(address,address,bytes32)"
+        ))
+    );
+    let logs = receipt.get("logs")?.as_array()?;
+
+    let normalized_factory_hint = factory_hint.and_then(normalize_address_str);
+    for log in logs {
+        let log_obj = match log.as_object() {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if let Some(hint) = normalized_factory_hint.as_deref() {
+            let log_addr = log_obj
+                .get("address")
+                .and_then(|v| v.as_str())
+                .and_then(normalize_address_str);
+            if log_addr.as_deref() != Some(hint) {
+                continue;
+            }
+        }
+
+        let topics = match log_obj.get("topics").and_then(|v| v.as_array()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if topics.len() < 3 {
+            continue;
+        }
+
+        let topic0 = match topics.get(0).and_then(|v| v.as_str()) {
+            Some(v) => v.to_lowercase(),
+            None => continue,
+        };
+        if topic0 != event_topic {
+            continue;
+        }
+
+        let topic2 = match topics.get(2).and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let account = match parse_abi_address(topic2) {
+            Some(v) => v,
+            None => continue,
+        };
+        return Some(address_to_hex(account));
+    }
+
+    None
 }
 
 async fn fetch_predicted_address(
@@ -1029,7 +1143,13 @@ async fn fetch_predicted_address(
         }, "latest"]
     });
 
-    let resp = state.client.post(upstream).json(&payload).send().await.ok()?;
+    let resp = state
+        .client
+        .post(upstream)
+        .json(&payload)
+        .send()
+        .await
+        .ok()?;
     let v: Value = resp.json().await.ok()?;
     let result = v.get("result")?.as_str()?;
     let addr = parse_abi_address(result)?;
@@ -1054,7 +1174,10 @@ async fn resolve_account(state: &AppState) -> String {
     if let (Some(db), Some(chain_id)) = (&state.db, state.chain_id) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
             if let Some(mode) = cfg.get("mode").and_then(|v| v.as_str()) {
-                let status = cfg.get("status").and_then(|v| v.as_str()).unwrap_or("inactive");
+                let status = cfg
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("inactive");
                 if mode.eq_ignore_ascii_case("SCA") && status.eq_ignore_ascii_case("active") {
                     if let Some(addr) = cfg.get("sca_address").and_then(|v| v.as_str()) {
                         return addr.to_string();

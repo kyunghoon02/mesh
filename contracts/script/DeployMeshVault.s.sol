@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {Script, console2} from "forge-std/Script.sol";
 import {MeshVaultFactory} from "../src/MeshVaultFactory.sol";
 
-/// @notice MeshVaultFactory 배포 및 MeshVault 생성 스크립트
+/// @notice MeshVaultFactory + MeshVault 배포 스크립트
 /// @dev env:
 /// - OWNER (address)            : SCA 소유자 EOA
 /// - PASSKEY_PUBKEY (bytes)     : WebAuthn 공개키(raw)
