@@ -21,13 +21,13 @@ use tracing::{error, info, warn};
 use common::{PacketType, SecurePacket, SerialResponse, SignRequestPayload, TransactionIntent};
 use heapless::String as HString;
 
+use crate::AppState;
 use crate::abi::{
     address_to_hex, encode_create_account, encode_get_address, encode_recover_owner,
     encode_set_passkey, parse_abi_address, parse_address, parse_bytes32, parse_hex_bytes, to_hex,
 };
 use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
 use crate::eth_rpc::{fetch_tx_receipt, parse_receipt_status};
-use crate::AppState;
 
 pub async fn rpc_handler(
     State(state): State<Arc<AppState>>,
@@ -1261,7 +1261,8 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
 
             if supports_passkey && status == "active" {
                 if let (Some(owner_addr), Some(sca)) = (owner, sca_for_setpasskey.as_deref()) {
-                    if let Ok(Some(passkey_record)) = get_passkey(db, &address_to_hex(owner_addr), chain_id).await
+                    if let Ok(Some(passkey_record)) =
+                        get_passkey(db, &address_to_hex(owner_addr), chain_id).await
                     {
                         if let Some(pubkey) = passkey_record
                             .get("passkey_pubkey")
@@ -1376,17 +1377,35 @@ async fn send_sign_request_if_possible(
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "error": {"code": -32012, "message": format!("hardware rejected: {}", resp.error_code)}
+                    "error": {
+                        "code": -32012,
+                        "message": format!(
+                            "hardware rejected: {} ({})",
+                            resp.error_code,
+                            hardware_error_message(resp.error_code)
+                        )
+                    }
                 }))
             }
         }
-        Err(e) => {
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32012, "message": e}
-            }))
-        }
+        Err(e) => Some(json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32012, "message": e}
+        })),
+    }
+}
+
+fn hardware_error_message(code: u8) -> &'static str {
+    match code {
+        common::error_codes::SUCCESS => "success",
+        common::error_codes::INVALID_STATE => "INVALID_STATE",
+        common::error_codes::NOT_PAIRED => "NOT_PAIRED",
+        common::error_codes::PAIRING_TIMEOUT => "PAIRING_TIMEOUT",
+        common::error_codes::ESPNOW_ERROR => "ESPNOW_ERROR",
+        common::error_codes::TIMEOUT => "TIMEOUT",
+        common::error_codes::INVALID_COMMAND => "INVALID_COMMAND",
+        _ => "UNKNOWN",
     }
 }
 
