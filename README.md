@@ -83,6 +83,9 @@ mesh/
 아래 스크립트를 통해 연동 점검을 수행합니다.
 
 `scripts/e2e_nodeb_relayer_check.ps1`
+- 기본 실행: `-SkipNodeB` 모드 (Node B 미연결 테스트)
+- 하드웨어 연결 후 실제 연동 점검: `-SkipNodeB` 없이 실행
+- 상세 체크리스트: `scripts/milestone3_e2e_checklist.md`
 
 - 요청: `mesh_getStatus` (반복)
   - 동작: `SERIAL` 상태 조회 요청을 반복 전송
@@ -100,4 +103,14 @@ mesh/
   - 동작: 하드웨어 경유 트랜잭션을 시뮬레이션
   - 기대 결과: 하드웨어 승인 경로(설정) 또는 업스트림 에러 코드가 명확하게 반환
 
-실 하드웨어(Node A, Node B)가 있어야 `mesh_getStatus` 및 하드웨어 경유 트랜잭션 플로우를 완전히 점검할 수 있습니다.
+### Node B 미연결 모드 실행 예시
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_check.ps1 `
+  -RpcUrl "http://localhost:8080" `
+  -StatusRepeat 3 `
+  -StatusIntervalMs 500 `
+  -SkipNodeB
+```
+
+실제 하드웨어(Node A, Node B)가 있어야 `mesh_getStatus` 및 하드웨어 경유 트랜잭션 플로우를 완전히 점검할 수 있습니다.
