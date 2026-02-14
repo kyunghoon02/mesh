@@ -96,6 +96,7 @@ function App() {
 
   const [logLines, setLogLines] = useState<string[]>([]);
   const [viewState, setViewState] = useState<ViewState>("idle");
+  const [signResult, setSignResult] = useState("");
 
   const appendLog = (line: string): void => {
     setLogLines((prev) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...prev].slice(0, 30));
@@ -575,6 +576,25 @@ function App() {
     }
   };
 
+  const handleSignDryRun = async (): Promise<void> => {
+    setLoading(true);
+    setSignResult("");
+    try {
+      const from = owner || "0x0000000000000000000000000000000000000000";
+      const message = "0xabcdef";
+      const result = await callRpc<string>("eth_sign", [from, message]);
+      const short = result.length > 24 ? `${result.slice(0, 12)}...${result.slice(-8)}` : result;
+      setSignResult(short);
+      appendLog(`eth_sign dry-run success: ${short}`);
+    } catch (error) {
+      const message = (error as Error).message;
+      setSignResult(`error: ${message}`);
+      appendLog(`eth_sign dry-run failed: ${message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleConfirmDeploy = async (): Promise<void> => {
     setErrorText("");
     setSettingsNotice("");
@@ -684,7 +704,11 @@ function App() {
             <button className="btn btn-amber" type="button" onClick={handleConfirmDeploy} disabled={loading}>
               Confirm Deploy
             </button>
+            <button className="btn btn-soft" type="button" onClick={() => void handleSignDryRun()} disabled={loading}>
+              Sign Dry-Run
+            </button>
           </div>
+          {signResult ? <p className={signResult.startsWith("error") ? "danger" : "success"}>{signResult}</p> : null}
           {errorText ? <p className="danger">{errorText}</p> : null}
         </article>
       </section>

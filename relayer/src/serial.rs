@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use common::{SecurePacket, SerialCommand, SerialFrame, SerialResponse};
 use postcard::{from_bytes, to_allocvec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,14 +6,15 @@ use tokio::sync::Mutex;
 use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, SerialStream, StopBits};
 use tracing::{debug, error, info, warn};
 
+type SharedSerial = Arc<Mutex<SerialStream>>;
+
 #[derive(Clone)]
 pub struct SerialClient {
-    inner: Arc<Mutex<SerialStream>>,
+    inner: SharedSerial,
 }
 
 impl SerialClient {
     pub async fn open(port: &str, baud: u32) -> Result<Self, String> {
-        // Windows: COM 포트, macOS/Linux: /dev/tty.*
         let builder = tokio_serial::new(port, baud)
             .data_bits(DataBits::Eight)
             .stop_bits(StopBits::One)
@@ -28,11 +28,10 @@ impl SerialClient {
     }
 
     pub async fn get_status(&self, sequence_id: u32) -> Result<u8, String> {
-        // Node B 상태 조회
-        info!(sequence_id = sequence_id, "mesh_getStatus 요청 전송");
-        let frame = SerialFrame::new(SerialCommand::GetStatus, sequence_id, &[])
-            .ok_or("frame build failed")?;
+        info!(sequence_id = sequence_id, "mesh_getStatus 요청");
+        let frame = SerialFrame::new(SerialCommand::GetStatus, sequence_id, &[]).ok_or("frame build failed")?;
         let resp = self.send_frame(frame).await?;
+
         if resp.sequence_id != sequence_id {
             return Err(format!(
                 "sequence mismatch: req={} resp={}",
@@ -42,6 +41,7 @@ impl SerialClient {
         if !resp.success {
             return Err(format!("device error: {}", resp.error_code));
         }
+
         let data = resp.payload_bytes();
         if data.is_empty() {
             warn!("mesh_getStatus payload empty");
@@ -60,10 +60,12 @@ impl SerialClient {
             ciphertext_len = packet.ciphertext_len,
             "eth_send/raw sign request 전송"
         );
+
         let payload = to_allocvec(packet).map_err(|e| e.to_string())?;
         let frame = SerialFrame::new(SerialCommand::SignRequest, sequence_id, &payload)
             .ok_or("frame build failed")?;
         let resp = self.send_frame(frame).await?;
+
         if resp.sequence_id != sequence_id {
             return Err(format!(
                 "sequence mismatch: req={} resp={}",
@@ -75,7 +77,6 @@ impl SerialClient {
 
     pub async fn send_frame(&self, frame: SerialFrame) -> Result<SerialResponse, String> {
         let mut guard = self.inner.lock().await;
-        // 프레임 형식: [len_lo, len_hi, payload...]
         let bytes = to_allocvec(&frame).map_err(|e| e.to_string())?;
         let len = bytes.len() as u16;
 
@@ -94,11 +95,7 @@ impl SerialClient {
             return Err(e.to_string());
         }
 
-        debug!(
-            command = ?frame.command,
-            payload_len = bytes.len(),
-            "serial frame sent"
-        );
+        debug!(command = ?frame.command, payload_len = bytes.len(), "serial frame sent");
 
         let mut len_buf = [0u8; 2];
         if let Err(e) = guard.read_exact(&mut len_buf).await {

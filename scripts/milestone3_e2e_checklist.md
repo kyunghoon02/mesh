@@ -1,38 +1,36 @@
-# Milestone 3 E2E µ¥¸ğ Ã¼Å©¸®½ºÆ® (Æ÷Æ®Æú¸®¿À¿ë)
+# Milestone 3 E2E ë°ëª¨ ì²´í¬ë¦¬ìŠ¤íŠ¸ (í¬íŠ¸í´ë¦¬ì˜¤ìš©)
 
-ÀÌ ¹®¼­´Â **Node B °æÀ¯ ¼­¸í ½ÂÀÎ Èå¸§**À» Æ÷Æ®Æú¸®¿À µ¥¸ğ·Î ÀçÇöÇÏ±â À§ÇÑ ½ÇÇà ¼ø¼­¸¦ Á¤¸®ÇÕ´Ï´Ù.
+ì´ ë¬¸ì„œëŠ” Node B ê²½ìœ  ì„œëª… ìŠ¹ì¸ íë¦„ ì ê²€ ìˆœì„œë¥¼ ì •ë¦¬í•œ ê²ƒì…ë‹ˆë‹¤.
 
-## 0) ½ÇÇà Àü Á¡°Ë
-- relayer `.env` ÃÖ¼Ò°ª
-  - `UPSTREAM_RPC` : Å×½ºÆ®³İ/¸ŞÀÎ³İ RPC
-  - `EOA_ADDRESS` : º»ÀÎ EOA
-  - `DATABASE_URL` : PostgreSQL ¿¬°á
-  - `APPROVAL_MODE=pass` (ÇÏµå¿ş¾î ¹Ì¿¬°á Å×½ºÆ®)
-  - `SERIAL_PORT` ¾øÀ½ (Node B ¹Ì¿¬°á È¯°æ)
-- relayer ½ÇÇà: `cargo run` (relayer Æú´õ)
+## 0) ì‹¤í–‰ ì „ ì ê²€
+- relayer `.env` í•„ìˆ˜ê°’
+  - `UPSTREAM_RPC` : í…ŒìŠ¤íŠ¸ë„·/ë©”ì¸ë„· RPC URL
+  - `EOA_ADDRESS` : ìš´ì˜ì EOA ì£¼ì†Œ
+  - `DATABASE_URL` : PostgreSQL ì—°ê²° ë¬¸ìì—´
+  - `SERIAL_PORT` : ë¯¸ì—°ê²°ì´ë©´ ë¹„ì›Œë‘ (ì´ë•ŒëŠ” Node B ìƒíƒœ ì²´í¬ê°€ ì‹¤íŒ¨ë¡œ í‘œì‹œë  ìˆ˜ ìˆìŒ)
+- relayer ì‹¤í–‰: `cargo run` (relayer í´ë”)
 
-## 1) Node B ¹Ì¿¬°á ¸ğµå ½º¸ğÅ© Ã¼Å© (ÇöÀç ÇÏµå¿ş¾î ÁØºñ Àü)
+## 1) Node B ë¯¸ì—°ê²° ëª¨ë“œ ìŠ¤ëª¨í¬ ì²´í¬
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_check.ps1 \
-  -RpcUrl "http://localhost:8080" \
-  -StatusRepeat 3 -StatusIntervalMs 500 \
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_check.ps1 `
+  -RpcUrl "http://localhost:8080" `
+  -StatusRepeat 3 -StatusIntervalMs 500 `
   -SkipNodeB
 ```
 
-### ±â´ë °á°ú
-- `mesh_getStatus`´Â `SERIAL_PORT not configured` ¿¡·¯¸¦ °æ°í·Î¸¸ ³²±è
-- `eth_chainId` / `mesh_getChainConfig`´Â È¯°æ¿¡ µû¶ó OK or °æ°í
-- `eth_call`/`eth_sendTransaction`Àº relayer°¡ Åë°ú ¶Ç´Â ¸íÈ®ÇÑ °ÅÀı »çÀ¯¸¦ ¹İÈ¯
+### ê¸°ëŒ€ ê²°ê³¼
+- `mesh_getStatus`: `SERIAL_PORT not configured` ë˜ëŠ” ì¥ì¹˜ ë¯¸ì—°ê²° ì—ëŸ¬ê°€ ê²½ê³  ì²˜ë¦¬
+- `eth_chainId` / `mesh_getChainConfig`: í™˜ê²½ì— ë”°ë¼ OK ë˜ëŠ” ê²½ê³ 
+- `eth_call`/`eth_sendTransaction`: ì—…ìŠ¤íŠ¸ë¦¼ ë˜ëŠ” í•˜ë“œì›¨ì–´ ê²½ë¡œ ìƒíƒœê°€ ëª…í™•íˆ ë°˜í™˜
 
-## 2) Node B ¿¬°á ¸ğµå(½ÇÁ¦ ¿¬µ¿) Á¡°Ë
+## 2) Node B ì—°ê²° ëª¨ë“œ ì ê²€
 
-1. Node B USB Á÷·Ä Æ÷Æ®¸¦ È®ÀÎÇÏ°í relayer¿¡ ¿¬°á
-   - ¿¹: `SERIAL_PORT=COM4` (Windows) ¶Ç´Â `/dev/ttyUSB0` (Linux)
-2. relayer Àç½ÇÇà
+1. Node B USB í¬íŠ¸ í™•ì¸ í›„ `SERIAL_PORT` ì„¤ì •
+   - ì˜ˆ: `SERIAL_PORT=COM4` (Windows) ë˜ëŠ” `/dev/ttyUSB0` (Linux)
+2. relayer ì¬ì‹¤í–‰
 
 ```bash
-APPROVAL_MODE=pass \
 SERIAL_PORT=/dev/ttyUSB0 \
 SERIAL_BAUD=115200 \
 UPSTREAM_RPC=<YOUR_RPC_URL> \
@@ -40,34 +38,28 @@ EOA_ADDRESS=<EOA> \
 cargo run
 ```
 
-3. °­Á¦ Á¡°Ë:
+3. ê°•ì œ ì ê²€
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_check.ps1 \
-  -RpcUrl "http://localhost:8080" \
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_check.ps1 `
+  -RpcUrl "http://localhost:8080" `
   -StatusRepeat 8 -StatusIntervalMs 300
 ```
 
-### ±â´ë °á°ú
-- `mesh_getStatus`°¡ Á¤»ó ÀÀ´ä
-- Node B ·Î±×¿¡ GET_STATUS / SignRequest ÇÚµå¼ÎÀÌÅ©°¡ º¸¿©¾ß ÇÔ
+### ê¸°ëŒ€ ê²°ê³¼
+- `mesh_getStatus`ê°€ ì •ìƒ ì‘ë‹µ
+- Node B ë¡œê·¸ì— GET_STATUS / SignRequest í¬ì›Œë”© í™•ì¸
 
-## 3) ½ÇÁ¦ Core UX µ¥¸ğ(±ÇÀå ½ÃÄö½º)
-1. dApp(¶Ç´Â `eth_call`/`eth_sendTransaction` dry-run)·Î Æ®·£Àè¼Ç ¿äÃ»
-2. Node B ·Î±×: SignRequest ¼ö½Å + ESP-NOW Àü¼Û
-3. Node A LCD: ½ÂÀÎ È­¸é(¿ä¾à ¹®ÀÚ¿­ + ÁøÇà ¹öÆ°) Ç¥½Ã
-4. ¹öÆ° 1È¸ ÅÇ: ½ÂÀÎ ÈÄ ¼­¸í
-5. Node B ·Î±×: ESP-NOW ÀÀ´ä ¼ö½Å ¹× serial ÀÀ´ä ¹İÈ¯
-6. relayer: tx ¼­¸í °á°ú ¹İÈ¯
+## 3) Core UX ë°ëª¨ ì‹œí€€ìŠ¤
+1. dApp ë˜ëŠ” `eth_call`/`eth_sendTransaction` dry-runìœ¼ë¡œ íŠ¸ëœì­ì…˜ ìš”ì²­
+2. Node B ë¡œê·¸: SignRequest ìˆ˜ì‹  + ESP-NOW ì „ì†¡
+3. Node A LCD: ìŠ¹ì¸/ê±°ì ˆ í™”ë©´(ìš”ì•½ ë¬¸ìì—´ + ë²„íŠ¼) í‘œì‹œ
+4. ìŠ¹ì¸ ë²„íŠ¼ íƒ­ ì‹œ: ì„œëª… ì‘ë‹µ ë°˜í™˜
+5. Node B ë¡œê·¸: ESP-NOW ì‘ë‹µ ìˆ˜ì‹  ë° serial ì‘ë‹µ ë°˜í™˜
+6. relayer: tx ì„œëª… ê²°ê³¼ ë°˜í™˜
 
-## 4) Æ÷Æ®Æú¸®¿À Ä¸Ã³ Ç×¸ñ(±ÇÀå)
-- Node B ½Ã¸®¾ó ·Î±× (GET_STATUS, SignRequest, Æ÷¿öµù/ÀÀ´ä)
-- Node A È­¸é(½ÂÀÎ/°ÅºÎ UI)
-- ºê¶ó¿ìÀú¿¡¼­ relayer ÀÀ´ä ·Î±×
-- e2e ½ºÅ©¸³Æ® °á°ú(`¿ä¾à: OK/ WARN/ FAIL`)
-
-## 5) ½ÇÆĞ Æ÷ÀÎÆ®¸¦ ÁÙÀÌ´Â µğ¹ö±ë ¿ì¼±¼øÀ§
-1) Node B ¿¬°á ½ÇÆĞ: relayer `Serial open failed`, Æ÷Æ®/±ÇÇÑ È®ÀÎ
-2) Node A Æä¾î¸µ ½ÇÆĞ: Node B¿¡¼­ `GetPeerInfo/ConfirmPairing` Àç½Ãµµ
-3) ¼­¸í ½ÇÆĞ: Node AÀÇ `ciphertext_len`, `auth_tag`, Àç½Ãµµ Ä«¿îÅÍ È®ÀÎ
-4) relayer `APPROVAL_MODE`: HARDWARE_REQUIRED(=block)¸é ÇÏµå¿ş¾î ¹Ì¿¬°á ½Ã Áï½Ã °ÅºÎ
+## 4) ë””ë²„ê¹… ìš°ì„ ìˆœìœ„
+1. Node B ì—°ê²° ì‹¤íŒ¨: `serial open failed`, í¬íŠ¸ ê¶Œí•œ/ë“œë¼ì´ë²„ í™•ì¸
+2. Node A í˜ì–´ë§ ì‹¤íŒ¨: `GetPeerInfo / ConfirmPairing` ì²˜ë¦¬ ì ê²€
+3. ì„œëª… ì‹¤íŒ¨: `ciphertext_len`, `auth_tag`, ì¹´ìš´í„°/nonce ì—°ë™ ì ê²€
+4. relayerëŠ” í•˜ë“œì›¨ì–´ ì—°ê²°ì´ ì—†ìœ¼ë©´ `SERIAL_PORT not configured`ë¥¼ ëª…ì‹œì ìœ¼ë¡œ ë°˜í™˜

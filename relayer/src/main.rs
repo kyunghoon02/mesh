@@ -24,31 +24,11 @@ pub struct AppState {
     pub factory_address: Option<String>,
     pub db: Option<Arc<PgClient>>,
     pub chain_id: Option<u64>,
-    pub approval_mode: ApprovalMode,
     pub serial: Option<SerialClient>,
     pub seq: Arc<AtomicU32>,
     pub counter: Arc<AtomicU64>,
     pub aead_key: [u8; 32],
     pub client: Client,
-}
-
-#[derive(Clone, Copy)]
-pub enum ApprovalMode {
-    Pass,
-    Block,
-}
-
-impl ApprovalMode {
-    fn from_env() -> Self {
-        match std::env::var("APPROVAL_MODE")
-            .unwrap_or_else(|_| "pass".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "block" => ApprovalMode::Block,
-            _ => ApprovalMode::Pass,
-        }
-    }
 }
 
 fn parse_aead_key_from_env_or_eoa() -> [u8; 32] {
@@ -175,7 +155,6 @@ async fn main() {
         factory_address,
         db,
         chain_id,
-        approval_mode: ApprovalMode::from_env(),
         serial,
         seq: Arc::new(AtomicU32::new(1)),
         counter: Arc::new(AtomicU64::new(1)),

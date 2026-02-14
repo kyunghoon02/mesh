@@ -27,7 +27,7 @@ use crate::abi::{
 };
 use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
 use crate::eth_rpc::{fetch_tx_receipt, parse_receipt_status};
-use crate::{AppState, ApprovalMode};
+use crate::AppState;
 
 pub async fn rpc_handler(
     State(state): State<Arc<AppState>>,
@@ -1320,19 +1320,14 @@ async fn send_sign_request_if_possible(
     method: &str,
 ) -> Option<Value> {
     let request_id = req.get("id").cloned().unwrap_or(Value::Null);
-    let require_hw = matches!(state.approval_mode, ApprovalMode::Block);
-
     let serial = match &state.serial {
         Some(s) => s,
         None => {
-            if require_hw {
-                return Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32011, "message": "SERIAL_PORT not configured"}
-                }));
-            }
-            return None;
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32011, "message": "SERIAL_PORT not configured"}
+            }));
         }
     };
 
@@ -1356,56 +1351,41 @@ async fn send_sign_request_if_possible(
     match serial.send_sign_request(seq, &packet).await {
         Ok(resp) => {
             if resp.success {
-                if is_signature_request(method) {
-                    if let Some(signature) = extract_signature_from_response(&resp, &state.aead_key)
-                    {
-                        return Some(json!({
-                            "jsonrpc": "2.0",
-                            "id": request_id,
-                            "result": to_hex(&signature)
-                        }));
-                    }
-
-                    warn!(
-                        "hardware sign response failed to decode signature: method={}",
-                        method
-                    );
-
-                    if require_hw {
-                        return Some(json!({
-                            "jsonrpc": "2.0",
-                            "id": request_id,
-                            "error": {
-                                "code": -32013,
-                                "message": "invalid hardware signature response"
-                            }
-                        }));
-                    }
+                if let Some(signature) = extract_signature_from_response(&resp, &state.aead_key) {
+                    return Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": to_hex(&signature)
+                    }));
                 }
 
-                None
-            } else if require_hw {
+                warn!(
+                    "hardware sign response failed to decode signature: method={}",
+                    method
+                );
+
+                return Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32013,
+                        "message": "invalid hardware signature response"
+                    }
+                }));
+            } else {
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "error": {"code": -32012, "message": format!("hardware rejected: {}", resp.error_code)}
                 }))
-            } else {
-                warn!("hardware rejected: {}", resp.error_code);
-                None
             }
         }
         Err(e) => {
-            if require_hw {
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32012, "message": e}
-                }))
-            } else {
-                warn!("serial send failed: {}", e);
-                None
-            }
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32012, "message": e}
+            }))
         }
     }
 }
@@ -1475,17 +1455,6 @@ fn build_nonce(boot_id: u32, counter: u64) -> chacha20poly1305::Nonce {
     chacha20poly1305::Nonce::from_slice(&out).to_owned()
 }
 
-fn is_signature_request(method: &str) -> bool {
-    matches!(
-        method,
-        "eth_sign"
-            | "personal_sign"
-            | "eth_signTypedData"
-            | "eth_signTypedData_v3"
-            | "eth_signTypedData_v4"
-    )
-}
-
 fn extract_signature_from_response(
     response: &SerialResponse,
     aead_key: &[u8; 32],
@@ -1495,7 +1464,7 @@ fn extract_signature_from_response(
         return None;
     }
 
-    let packet: SecurePacket = from_bytes(payload).ok()?;
+    let packet = from_bytes::<SecurePacket>(payload).ok()?;
     if packet.payload_type != PacketType::SignResponse {
         return None;
     }
@@ -1504,10 +1473,7 @@ fn extract_signature_from_response(
         return None;
     }
 
-    let (plain, plain_len) = match decrypt_packet_payload(&packet, aead_key) {
-        Some(v) => v,
-        None => return None,
-    };
+    let (plain, plain_len) = decrypt_packet_payload(&packet, aead_key)?;
 
     Some(plain[..plain_len].to_vec())
 }
