@@ -1,4 +1,4 @@
-﻿/target
+/target
 plan.md
 prd.md
 /contracts/lib
@@ -7,3 +7,4 @@ prd.md
 /contracts/broadcast
 /relayer/.env
 mesh.pen
+scripts/
