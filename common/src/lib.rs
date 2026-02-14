@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-/// Endianness policy: postcard uses Little Endian.
-/// All nodes (Relayer, Node A, Node B) are expected to be LE.
-
+/// 바이트 정렬 정책: postcard는 기본적으로 Little Endian을 사용합니다.
+/// Relayer, Node A, Node B 모두 Little Endian 환경을 기준으로 동작합니다.
 #[derive(Serialize_repr, Deserialize_repr, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PacketType {
@@ -20,13 +19,13 @@ pub enum PacketType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SecurePacket {
     pub version: u8,
-    pub boot_id: u32, // Session ID (reset on reboot)
-    pub counter: u64, // Anti-replay counter
+    pub boot_id: u32, // 부팅 단위 세션 ID(재부팅 시 재설정)
+    pub counter: u64, // 재전송 방지용 카운터
     pub payload_type: PacketType,
-    pub ciphertext_len: u8, // 0..=192
+    pub ciphertext_len: u8, // 0~192
     #[serde(with = "BigArray")]
-    pub ciphertext: [u8; 192], // ESP-NOW 250-byte limit (with padding)
-    pub auth_tag: [u8; 16], // AEAD authentication tag
+    pub ciphertext: [u8; 192], // ESP-NOW 250바이트 제한을 고려한 패딩 포함 버퍼
+    pub auth_tag: [u8; 16], // AEAD 인증 태그
 }
 
 impl SecurePacket {
@@ -54,44 +53,44 @@ impl SecurePacket {
 pub struct TransactionIntent {
     pub chain_id: u64,
     pub target_address: [u8; 20],
-    pub eth_value: u128, // Wei
-    pub risk_level: u8,  // 0: Safe, 1: Warning, 2: Danger
+    pub eth_value: u128,      // Wei
+    pub risk_level: u8,       // 0: 안전, 1: 경고, 2: 위험
     pub summary: String<64>,
 }
 
-/// 서명 요청(SignRequest) 페이로드 구조
-/// 노드간 검증 가능한 메시지를 전달하기 위한 공용 형식.
+/// 서명 요청(SignRequest) 페이로드 타입
+/// 트랜잭션 의도(intent)를 바이트로 패킹하기 위한 구조체
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SignRequestPayload {
     pub hash: [u8; 32],
     pub intent: TransactionIntent,
 }
 
-/// Serial Command Set for Node B Gateway
-/// Node B only responds to these specific commands for security
+/// Node B 게이트웨이에서 처리할 시리얼 명령셋
+/// 보안상 허용된 명령만 노드 사이에서 응답한다.
 #[derive(Serialize_repr, Deserialize_repr, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SerialCommand {
-    /// Enter pairing mode (only allowed in first 5 min after boot)
+    /// 페어링 모드 진입(부팅 후 5분 이내만 허용)
     EnterPairing = 0x01,
-    /// Get peer info (MAC address) during pairing
+    /// 페어링 중 상대 노드의 MAC 정보 조회
     GetPeerInfo = 0x02,
-    /// Confirm pairing with Node A
+    /// Node A와 페어링 확정
     ConfirmPairing = 0x03,
-    /// Send transaction intent for signing (only in READY state)
+    /// READY 상태에서 서명 의도 전송
     SignRequest = 0x10,
-    /// Get current pairing status
+    /// 현재 페어링 상태 조회
     GetStatus = 0x20,
 }
 
-/// Serial Frame for Node B communication
-/// Frame format over UART: [len_lo, len_hi, SerialFrame...]
+/// Node B와의 시리얼 프레임
+/// UART 포맷: [len_lo, len_hi, SerialFrame...]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SerialFrame {
     pub command: SerialCommand,
-    pub sequence_id: u32, // Anti-replay counter for Serial layer
+    pub sequence_id: u32, // 시리얼 레이어 재전송 방지 카운터
     #[serde(with = "BigArray")]
-    pub payload: [u8; 240], // Max payload size (fits SecurePacket)
+    pub payload: [u8; 240], // 최대 payload 크기( SecurePacket 전송용 )
     pub payload_len: u16,
 }
 
@@ -115,12 +114,12 @@ impl SerialFrame {
     }
 }
 
-/// Response frame from Node B to Relayer
+/// Node B -> Relayer 응답 프레임
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SerialResponse {
-    pub sequence_id: u32, // Matches request sequence_id
+    pub sequence_id: u32,   // 요청 sequence_id와 매칭
     pub success: bool,
-    pub error_code: u8, // 0 = success, others = error codes
+    pub error_code: u8,     // 0: 성공, 그 외: 오류 코드
     #[serde(with = "BigArray")]
     pub payload: [u8; 240],
     pub payload_len: u16,
@@ -157,7 +156,7 @@ impl SerialResponse {
     }
 }
 
-/// Error codes for SerialResponse
+/// SerialResponse 에러 코드 정의
 pub mod error_codes {
     pub const SUCCESS: u8 = 0;
     pub const INVALID_STATE: u8 = 1;

@@ -1,103 +1,69 @@
-## Foundry
+# Mesh Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+## 환경 구성
 
-Foundry consists of:
+필요한 라이브러리는 소스 트리에 커밋하지 않고, 실행 시 설치합니다.
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```bash
+cd contracts
+forge install
 ```
 
-### Test
+`forge-std`가 아직 설치되어 있지 않다면 아래 명령어로 수동 설치 가능합니다.
 
-```shell
-$ forge test
+```bash
+cd contracts
+forge install foundry-rs/forge-std
 ```
 
-### Format
+`foundry.toml`에는 다음 설정이 유지되어 있어야 합니다.
 
-```shell
-$ forge fmt
+- `libs = ["lib"]`
+
+## 기본 사용법
+
+- 빌드
+
+```bash
+cd contracts
+forge build
 ```
 
-### Gas Snapshots
+- 테스트
 
-```shell
-$ forge snapshot
+```bash
+cd contracts
+forge test
 ```
 
-### Anvil
+- 포맷
 
-```shell
-$ anvil
+```bash
+cd contracts
+forge fmt
 ```
 
-### Deploy
+- 배포 예시 (Sepolia)
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Sepolia: Mesh Passkey Stack 배포
-
-기존에 배포된 P-256 verifier(예: Daimo 배포본)를 재사용할 때:
-
-```shell
-$ forge script script/DeployPasskeyStack.s.sol:DeployPasskeyStack \
+```bash
+cd contracts
+forge script script/DeployPasskeyStack.s.sol:DeployPasskeyStack \
   --rpc-url $SEPOLIA_RPC_URL \
   --private-key $PRIVATE_KEY \
   --broadcast
 ```
 
-필수 env:
+- 패스키 검증기 연결 예시
 
-```shell
-OWNER=0x...
-PASSKEY_PUBKEY=0x...
-P256_VERIFIER=0x...    # 기존 배포 verifier 주소
-SALT=0x...             # 선택
-FACTORY=0x...          # 선택(기존 factory 재사용 시)
-```
-
-`DeployPasskeyStack` 실행 후 `Vault linked in script: false`가 나오면(배포 계정 != OWNER):
-
-```shell
-$ forge script script/SetPasskeyVerifier.s.sol:SetPasskeyVerifier \
+```bash
+cd contracts
+forge script script/SetPasskeyVerifier.s.sol:SetPasskeyVerifier \
   --rpc-url $SEPOLIA_RPC_URL \
   --private-key $OWNER_PRIVATE_KEY \
   --broadcast
 ```
 
-필수 env:
+## 주의
 
-```shell
-VAULT=0x...
-PASSKEY_VERIFIER=0x...
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+- 이 저장소는 `contracts/lib` 폴더를 `.gitignore`로 제외하므로 라이브러리 코드는 커밋되지 않습니다.
+- 처음 클론한 뒤 실행 전에 반드시 `forge install` 또는 `forge install foundry-rs/forge-std`를 먼저 수행하세요.

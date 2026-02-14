@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 #![no_main]
 
 mod comm;
@@ -49,22 +49,22 @@ fn main() -> ! {
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
     let mut rng = Rng::new(peripherals.RNG);
 
-    // 부팅 시각을 기준으로 페어링 타임아웃을 계산하기 위해 타이머를 준비한다.
+    // 遺???쒓컖??湲곗??쇰줈 ?섏뼱留???꾩븘?껋쓣 怨꾩궛?섍린 ?꾪빐 ??대㉧瑜?以鍮꾪븳??
     let systimer = SystemTimer::new(peripherals.SYSTIMER);
     let boot_time_ms = systimer.now() / 1000;
 
-    // 상태 관리자 생성 후 저장된 페어링 정보가 있으면 복원한다.
+    // ?곹깭 愿由ъ옄 ?앹꽦 ????λ맂 ?섏뼱留??뺣낫媛 ?덉쑝硫?蹂듭썝?쒕떎.
     let mut state_mgr = StateManager::new(boot_time_ms);
     let mut pairing_storage = PairingStorage::new();
 
     if let Some(mac) = pairing_storage.load_peer_mac() {
         state_mgr.restore_paired(mac);
-        esp_println::println!("[pairing] 저장된 peer MAC 복원: {:?}", mac);
+        esp_println::println!("[pairing][event=restore.ok] mac={:?}", mac);
     } else {
-        esp_println::println!("[pairing] 저장된 peer MAC이 없습니다.");
+        esp_println::println!("[pairing][event=restore.miss]");
     }
 
-    // UART를 통해 Relayer와의 Serial 채널을 연다.
+    // UART瑜??듯빐 Relayer???Serial 梨꾨꼸???곕떎.
     let uart_cfg = UartConfig::default().baudrate(115200);
     let uart = Uart::new(
         peripherals.UART0,
@@ -76,7 +76,7 @@ fn main() -> ! {
     .expect("uart init failed");
     let mut serial = serial::SerialManager::new(uart);
 
-    // ESP-NOW 송수신을 위해 Wi-Fi 스택을 초기화한다.
+    // ESP-NOW ?≪닔?좎쓣 ?꾪빐 Wi-Fi ?ㅽ깮??珥덇린?뷀븳??
     let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
     let wifi_init = initialize(
         EspWifiInitFor::Wifi,
@@ -90,7 +90,7 @@ fn main() -> ! {
     let esp_now =
         esp_wifi::esp_now::EspNow::new(&wifi_init, peripherals.WIFI).expect("esp-now init failed");
 
-    // 복원이 된 MAC이 있으면 부팅 시점부터 바로 READY로 통신할 수 있게 준비한다.
+    // 蹂듭썝????MAC???덉쑝硫?遺???쒖젏遺??諛붾줈 READY濡??듭떊?????덇쾶 以鍮꾪븳??
     let mut comm: Option<comm::CommManager<'_>> = None;
     let mut esp_now_opt = Some(esp_now);
     if let Some(restored_mac) = state_mgr.peer_mac() {
@@ -108,13 +108,13 @@ fn main() -> ! {
     loop {
         let current_time_ms = systimer.now() / 1000;
 
-        // 페어링 모드가 5분을 넘기면 페어링을 강제로 종료한다.
+        // ?섏뼱留?紐⑤뱶媛 5遺꾩쓣 ?섍린硫??섏뼱留곸쓣 媛뺤젣濡?醫낅즺?쒕떎.
         if state_mgr.expire_pairing_if_needed(current_time_ms) {
-            esp_println::println!("[pairing] 페어링 대기 시간이 만료되어 상태를 초기화합니다.");
+            esp_println::println!("[pairing][event=state_expire] reset due timeout");
             pending = None;
         }
 
-        // Serial 입력을 읽고 명령을 처리한다.
+        // Serial ?낅젰???쎄퀬 紐낅졊??泥섎━?쒕떎.
         match serial.poll_read_frame(&mut rx_buf) {
             Ok(Some(len)) => match from_bytes::<SerialFrame>(&rx_buf[..len]) {
                 Ok(frame) => {
@@ -124,12 +124,12 @@ fn main() -> ! {
                         if let Ok(serialized) = to_slice(&response, &mut response_buf) {
                             let _ = serial.write_frame(serialized);
                         }
-                        esp_println::println!("[serial] 잘못된 payload_len={}", frame.payload_len);
+                        esp_println::println!("[serial][event=recv.invalid_payload_len] payload_len={}", frame.payload_len);
                         continue;
                     }
 
                     esp_println::println!(
-                        "[serial] 수신: cmd={:?} seq={} payload_len={}",
+                        "[serial][event=recv.frame] cmd={:?} seq={} payload_len={}",
                         frame.command,
                         frame.sequence_id,
                         frame.payload_len
@@ -142,7 +142,7 @@ fn main() -> ! {
                             let _ = serial.write_frame(serialized);
                         }
                         esp_println::println!(
-                            "[serial] 잘못된 명령/길이: cmd={:?} payload_len={}",
+                            "[serial][event=recv.invalid_command] cmd={:?} payload_len={}",
                             frame.command,
                             frame.payload_len
                         );
@@ -156,7 +156,7 @@ fn main() -> ! {
                             let _ = serial.write_frame(serialized);
                         }
                         esp_println::println!(
-                            "[serial] 중복 시퀀스 거부: seq={}",
+                            "[serial][event=recv.duplicate_sequence] seq={}",
                             frame.sequence_id
                         );
                         continue;
@@ -175,20 +175,20 @@ fn main() -> ! {
                     if let Ok(serialized) = to_slice(&response, &mut response_buf) {
                         if let Err(_) = serial.write_frame(serialized) {
                             esp_println::println!(
-                                "[serial] 응답 송신 실패 seq={}",
+                                "[serial][event=send.response_failed] seq={}",
                                 frame.sequence_id
                             );
                         }
                     } else {
                         esp_println::println!(
-                            "[serial] 응답 직렬화 실패 seq={}",
+                            "[serial][event=send.serialize_failed] seq={}",
                             frame.sequence_id
                         );
                     }
                 }
                 Err(err) => {
                     esp_println::println!(
-                        "[serial] 프레임 역직렬화 실패 len={} err={:?}",
+                        "[serial][event=recv.frame_decode_failed] len={} err={:?}",
                         len,
                         err
                     );
@@ -196,15 +196,15 @@ fn main() -> ! {
             },
             Ok(None) => {}
             Err(serial_err) => match serial_err {
-                serial::SerialError::Io => esp_println::println!("[serial] IO 오류"),
+                serial::SerialError::Io => esp_println::println!("[serial][event=io_error]"),
                 serial::SerialError::InvalidLen => {
-                    esp_println::println!("[serial] 잘못된 길이 수신(0 또는 버퍼 초과)")
+                    esp_println::println!("[serial][event=recv.invalid_length]")
                 }
-                serial::SerialError::Empty => esp_println::println!("[serial] 빈 프레임 수신"),
+                serial::SerialError::Empty => esp_println::println!("[serial][event=recv.empty_frame]"),
             },
         }
 
-        // ESP-NOW로부터 서명 응답/오류 수신 시 relayer 쪽 시퀀스로 즉시 반환한다.
+        // ESP-NOW濡쒕????쒕챸 ?묐떟/?ㅻ쪟 ?섏떊 ??relayer 履??쒗?ㅻ줈 利됱떆 諛섑솚?쒕떎.
         if let Some(ref mut comm_mgr) = comm {
             if let Some(packet) = comm_mgr.receive_packet() {
                 if !matches!(
@@ -212,7 +212,7 @@ fn main() -> ! {
                     PacketType::SignResponse | PacketType::ErrorMessage
                 ) {
                     esp_println::println!(
-                        "[esp-now] 처리 대상이 아닌 패킷: type={:?}, seq={}",
+                        "[espnow][event=recv.unexpected_type] type={:?} seq={}",
                         packet.payload_type,
                         packet.counter
                     );
@@ -223,7 +223,7 @@ fn main() -> ! {
                     Some(v) => v,
                     None => {
                         esp_println::println!(
-                            "[esp-now] 매칭되지 않은 응답 수신: packet.seq={}",
+                            "[espnow][event=recv.unmatched_seq] packet_seq={}",
                             packet.counter
                         );
                         continue;
@@ -233,7 +233,7 @@ fn main() -> ! {
                 let payload = match to_slice(&packet, &mut response_buf) {
                     Ok(v) => v,
                     Err(_) => {
-                        esp_println::println!("[esp-now] 패킷 직렬화 실패 seq={}", seq);
+                        esp_println::println!("[espnow][event=serialize.packet_failed] seq={}", seq);
                         let response = SerialResponse::error(seq, error_codes::INVALID_COMMAND);
                         if let Ok(serialized) = to_slice(&response, &mut response_buf) {
                             let _ = serial.write_frame(serialized);
@@ -252,7 +252,7 @@ fn main() -> ! {
             }
         }
 
-        // ESP-NOW 송신 대기 중 타임아웃/재시도 정책을 적용한다.
+        // ESP-NOW ?≪떊 ?湲?以???꾩븘???ъ떆???뺤콉???곸슜?쒕떎.
         if let Some(p) = pending.as_mut() {
             if current_time_ms.saturating_sub(p.first_sent_ms) >= RESPONSE_TIMEOUT_MS {
                 let response = SerialResponse::error(p.sequence_id, error_codes::TIMEOUT);
@@ -260,7 +260,7 @@ fn main() -> ! {
                     let _ = serial.write_frame(serialized);
                 }
                 esp_println::println!(
-                    "[timeout] seq={} 재시도={} 건 timeout",
+                    "[boundary][event=timeout] seq={} retries={}",
                     p.sequence_id,
                     p.retries
                 );
@@ -269,7 +269,7 @@ fn main() -> ! {
                 if p.retries < MAX_RETRIES {
                     if let Some(ref mut comm_mgr) = comm {
                         esp_println::println!(
-                            "[retry] seq={} 재시도 횟수={}",
+                            "[boundary][event=retry.send] seq={} attempt={}",
                             p.sequence_id,
                             p.retries + 1
                         );
@@ -278,13 +278,13 @@ fn main() -> ! {
                         p.last_sent_ms = current_time_ms;
                     } else {
                         esp_println::println!(
-                            "[retry] seq={} comm 미생성으로 재시도 중단",
+                            "[boundary][event=retry.halt_comm_missing] seq={}",
                             p.sequence_id
                         );
                     }
                 } else {
                     esp_println::println!(
-                        "[retry] seq={} 최대 재시도 초과 ({}/{})",
+                        "[boundary][event=retry.give_up] seq={} retries={} max={}",
                         p.sequence_id,
                         p.retries,
                         MAX_RETRIES
@@ -304,7 +304,7 @@ fn process_command<'a>(
     pending: &mut Option<PendingRequest>,
     pairing_storage: &mut PairingStorage,
 ) -> SerialResponse {
-    // 보안상 240 바이트 이상 payload는 모두 거부한다.
+    // 蹂댁븞??240 諛붿씠???댁긽 payload??紐⑤몢 嫄곕??쒕떎.
     if frame.payload_len as usize > MAX_SERIAL_PAYLOAD {
         return SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND);
     }
@@ -312,13 +312,13 @@ fn process_command<'a>(
     match frame.command {
         SerialCommand::EnterPairing => match state_mgr.enter_pairing(current_time_ms) {
             Ok(_) => {
-                esp_println::println!("[command] EnterPairing ok");
+                esp_println::println!("[command][event=enter_pairing.ok]");
                 SerialResponse::success(frame.sequence_id, b"PAIRING_MODE").unwrap_or_else(|| {
                     SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND)
                 })
             }
             Err(_) => {
-                esp_println::println!("[command] EnterPairing rejected: invalid state");
+                esp_println::println!("[command][event=enter_pairing.rejected.invalid_state]");
                 SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE)
             }
         },
@@ -329,7 +329,7 @@ fn process_command<'a>(
                 PairingState::Pairing | PairingState::Ready
             ) {
                 esp_println::println!(
-                    "[command] GetPeerInfo rejected: state={:?}",
+                    "[command][event=get_peer_info.rejected.invalid_state] state={:?}",
                     state_mgr.state()
                 );
                 return SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE);
@@ -342,7 +342,7 @@ fn process_command<'a>(
                     })
                 }
                 None => {
-                    esp_println::println!("[command] GetPeerInfo: peer mac is not set");
+                    esp_println::println!("[command][event=get_peer_info.rejected.no_mac]");
                     SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE)
                 }
             }
@@ -351,7 +351,7 @@ fn process_command<'a>(
         SerialCommand::ConfirmPairing => {
             if state_mgr.state() != PairingState::Pairing {
                 esp_println::println!(
-                    "[command] ConfirmPairing rejected: state={:?}",
+                    "[command][event=confirm_pairing.rejected.invalid_state] state={:?}",
                     state_mgr.state()
                 );
                 return SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE);
@@ -359,7 +359,7 @@ fn process_command<'a>(
 
             if frame.payload_len != 6 {
                 esp_println::println!(
-                    "[command] ConfirmPairing rejected: payload_len={}",
+                    "[command][event=confirm_pairing.rejected.invalid_payload_len] len={}",
                     frame.payload_len
                 );
                 return SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND);
@@ -373,7 +373,7 @@ fn process_command<'a>(
                 Ok(_) => {
                     let should_save = pairing_storage.save_peer_mac(&mac).is_ok();
                     if !should_save {
-                        esp_println::println!("[pairing] peer mac 영속 저장 실패: {:?}", mac);
+                        esp_println::println!("[pairing][event=save_mac.failed] mac={:?}", mac);
                         return SerialResponse::error(
                             frame.sequence_id,
                             error_codes::INVALID_COMMAND,
@@ -381,17 +381,17 @@ fn process_command<'a>(
                     }
 
                     if let Some(esp_now) = esp_now.take() {
-                        // 저장된 MAC을 즉시 사용해 ESP-NOW Peer를 구성한다.
+                        // ??λ맂 MAC??利됱떆 ?ъ슜??ESP-NOW Peer瑜?援ъ꽦?쒕떎.
                         *comm = Some(comm::CommManager::new(esp_now, mac));
                     }
 
-                    esp_println::println!("[pairing] ConfirmPairing success: {:?}", mac);
+                    esp_println::println!("[pairing][event=confirm_pairing.success] mac={:?}", mac);
                     SerialResponse::success(frame.sequence_id, b"PAIRED").unwrap_or_else(|| {
                         SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND)
                     })
                 }
                 Err(_) => {
-                    esp_println::println!("[pairing] ConfirmPairing rejected: invalid state");
+                    esp_println::println!("[pairing][event=confirm_pairing.rejected.invalid_state]");
                     SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE)
                 }
             }
@@ -404,28 +404,28 @@ fn process_command<'a>(
 
             if !is_expected_payload_len(frame) {
                 esp_println::println!(
-                    "[command] SignRequest rejected: invalid payload_len={}",
+                    "[command][event=sign_request.rejected.invalid_payload_len] len={}",
                     frame.payload_len
                 );
                 return SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND);
             }
 
             if pending.is_some() {
-                esp_println::println!("[command] SignRequest rejected: pending request exists");
+                esp_println::println!("[command][event=sign_request.rejected.pending]");
                 return SerialResponse::error(frame.sequence_id, error_codes::INVALID_STATE);
             }
 
             let Some(comm_mgr) = comm.as_mut() else {
-                esp_println::println!("[command] SignRequest rejected: no pair channel");
+                esp_println::println!("[command][event=sign_request.rejected.no_pairing_channel]");
                 return SerialResponse::error(frame.sequence_id, error_codes::NOT_PAIRED);
             };
 
-            // payload는 SecurePacket 직렬화 값이어야 하며 최소 프로토콜 유효성 검사를 통과해야 한다.
+            // payload??SecurePacket 吏곷젹??媛믪씠?댁빞 ?섎ŉ 理쒖냼 ?꾨줈?좎퐳 ?좏슚??寃?щ? ?듦낵?댁빞 ?쒕떎.
             match from_bytes::<common::SecurePacket>(frame_payload_bytes(frame)) {
                 Ok(packet) => {
                     if !is_valid_secure_packet_for_sign_request(&packet) {
                         esp_println::println!(
-                            "[command] SignRequest rejected: invalid secure packet (version={}, payload_len={})",
+                            "[command][event=sign_request.rejected.invalid_packet] version={} payload_len={}",
                             packet.version,
                             packet.ciphertext_len
                         );
@@ -452,7 +452,7 @@ fn process_command<'a>(
                         }
                         Err(_) => {
                             esp_println::println!(
-                                "[command] SignRequest rejected: ESP-NOW send failed seq={}",
+                                "[command][event=sign_request.rejected.esp_now_send_failed] seq={}",
                                 frame.sequence_id
                             );
                             SerialResponse::error(frame.sequence_id, error_codes::ESPNOW_ERROR)
@@ -461,7 +461,7 @@ fn process_command<'a>(
                 }
                 Err(_) => {
                     esp_println::println!(
-                        "[command] SignRequest rejected: SecurePacket decode failed seq={}",
+                        "[command][event=sign_request.rejected.packet_decode_failed] seq={}",
                         frame.sequence_id
                     );
                     SerialResponse::error(frame.sequence_id, error_codes::INVALID_COMMAND)
@@ -543,3 +543,6 @@ fn frame_payload_bytes(frame: &SerialFrame) -> &[u8] {
         &frame.payload[..len]
     }
 }
+
+
+

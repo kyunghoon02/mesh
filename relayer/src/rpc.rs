@@ -67,7 +67,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
     let has_id = obj.contains_key("id");
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
 
-    // id媛 ?녾굅??null?대㈃ JSON-RPC ?붿껌 ?먯껜瑜?臾댁떆?쒕떎.
+    // id가 없거나 null이면 JSON-RPC 사양에 맞지 않으므로 무시한다.
     if !has_id || id.is_null() {
         return None;
     }
@@ -171,7 +171,7 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }
     }
 
-    // ?낆뒪?몃┝ RPC媛 ?놁쑝硫??먮윭濡?諛섑솚?섍퀬 ?붿껌?????댁긽 泥섎━?섏? ?딅뒗??
+    // 그 외 RPC는 upstream 노드로 그대로 전달한다.
     let upstream = resolve_upstream(state, req).await;
     if upstream.is_empty() {
         return Some(json!({
@@ -233,7 +233,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         .and_then(parse_bytes32);
 
     let mut factory = None;
-    // 泥댁씤蹂??⑥뒪??吏???щ?(誘몄???泥댁씤? EOA 蹂듦뎄留?
+    // 체인별 설정에서 factory 주소를 조회하고 없으면 기본값을 사용한다.
     let mut supports_passkey = false;
     if let (Some(db), Some(chain_id)) = (&state.db, chain_opt) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
@@ -262,7 +262,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    // ?⑥뒪??吏??泥댁씤?먯꽌??passkey_pubkey ?꾩닔, 誘몄???泥댁씤? 鍮?媛??덉슜
+    // 패스키 지원 체인에서는 passkey_pubkey가 필수다.
     let passkey = if supports_passkey {
         match passkey {
             Some(v) => {
@@ -284,7 +284,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
             }
         }
     } else {
-        // Passkey 誘몄???泥댁씤? 鍮?pubkey ?덉슜
+        // 패스키 미사용 체인은 pubkey를 비워 둔다.
         passkey.unwrap_or_default()
     };
 
@@ -1192,7 +1192,6 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
             });
         }
     };
-
     let upstream = resolve_upstream(state, req).await;
     let receipt = match fetch_tx_receipt(&state.client, &upstream, tx_hash).await {
         Ok(v) => v,
@@ -1235,7 +1234,6 @@ async fn handle_confirm_deploy(req: &Value, state: &AppState) -> Value {
                 .or_else(|| receipt.as_ref().and_then(extract_receipt_contract_address));
 
             let resolved_sca = sca_address.clone().or(receipt_sca.clone());
-
             let mut supports_passkey = false;
             if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
                 supports_passkey = cfg

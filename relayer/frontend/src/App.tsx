@@ -60,7 +60,7 @@ async function getWalletAccount(forceSelect = false): Promise<string | null> {
         params: [{ eth_accounts: {} }]
       });
     } catch (error) {
-      // Ignore and fall back to eth_requestAccounts.
+      // 권한 팝업이 실패하면 eth_requestAccounts로 대체 처리한다.
     }
   }
   const accounts = (await window.ethereum.request({

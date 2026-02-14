@@ -62,7 +62,7 @@ pub fn to_hex(data: &[u8]) -> String {
 }
 
 pub fn encode_create_account(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Vec<u8> {
-    // 함수 셀렉터: createAccount(address,bytes,bytes32)
+    // 함수 시그니처: createAccount(address,bytes,bytes32)
     let mut hasher = Keccak256::new();
     hasher.update(b"createAccount(address,bytes,bytes32)");
     let selector = &hasher.finalize()[..4];
@@ -70,11 +70,11 @@ pub fn encode_create_account(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) ->
     let mut out = Vec::with_capacity(4 + 32 * 3 + 32 + passkey.len() + 32);
     out.extend_from_slice(selector);
 
-    // 헤드 (3 * 32 bytes)
+    // 헤드(3 * 32 바이트)
     // 1) owner 주소
     out.extend_from_slice(&[0u8; 12]);
     out.extend_from_slice(&owner);
-    // 2) bytes 데이터 오프셋 (0x60)
+    // 2) bytes 데이터 오프셋(0x60)
     out.extend_from_slice(&u256_be(0x60));
     // 3) bytes32 salt
     out.extend_from_slice(&salt);
@@ -90,7 +90,7 @@ pub fn encode_create_account(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) ->
 }
 
 pub fn encode_get_address(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Vec<u8> {
-    // 함수 셀렉터: getAddress(address,bytes,bytes32)
+    // 함수 시그니처: getAddress(address,bytes,bytes32)
     let mut hasher = Keccak256::new();
     hasher.update(b"getAddress(address,bytes,bytes32)");
     let selector = &hasher.finalize()[..4];
@@ -98,11 +98,11 @@ pub fn encode_get_address(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Ve
     let mut out = Vec::with_capacity(4 + 32 * 3 + 32 + passkey.len() + 32);
     out.extend_from_slice(selector);
 
-    // 헤드 (3 * 32 bytes)
+    // 헤드(3 * 32 바이트)
     // 1) owner 주소
     out.extend_from_slice(&[0u8; 12]);
     out.extend_from_slice(&owner);
-    // 2) bytes 데이터 오프셋 (0x60)
+    // 2) bytes 데이터 오프셋(0x60)
     out.extend_from_slice(&u256_be(0x60));
     // 3) bytes32 salt
     out.extend_from_slice(&salt);
@@ -117,7 +117,7 @@ pub fn encode_get_address(owner: [u8; 20], passkey: &[u8], salt: [u8; 32]) -> Ve
     out
 }
 
-/// setPasskey(bytes) calldata를 인코딩한다.
+/// setPasskey(bytes) calldata 인코딩
 pub fn encode_set_passkey(pubkey: &[u8]) -> Vec<u8> {
     let mut hasher = Keccak256::new();
     hasher.update(b"setPasskey(bytes)");
@@ -126,7 +126,7 @@ pub fn encode_set_passkey(pubkey: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 32 + 32 + pubkey.len() + 32);
     out.extend_from_slice(selector);
 
-    // bytes 값은 동적 슬롯 오프셋 0x20으로 시작한다.
+    // bytes 타입은 0x20 오프셋에서 시작
     out.extend_from_slice(&u256_be(0x20));
     out.extend_from_slice(&u256_be(pubkey.len() as u64));
     out.extend_from_slice(pubkey);
@@ -138,7 +138,7 @@ pub fn encode_set_passkey(pubkey: &[u8]) -> Vec<u8> {
     out
 }
 
-/// recoverOwner(address,bytes,bytes,bytes) calldata를 인코딩한다.
+/// recoverOwner(address,bytes,bytes,bytes) calldata 인코딩
 pub fn encode_recover_owner(
     new_owner: [u8; 20],
     authenticator_data: &[u8],
@@ -164,15 +164,15 @@ pub fn encode_recover_owner(
     let mut out = Vec::with_capacity(4 + 32 * 4 + auth_tail + client_tail + sig_tail);
     out.extend_from_slice(selector);
 
-    // newOwner (address, 20 bytes)
+    // newOwner (address, 20 바이트)
     out.extend_from_slice(&[0u8; 12]);
     out.extend_from_slice(&new_owner);
-    // dynamic bytes offsets
+    // 동적 슬롯 오프셋
     out.extend_from_slice(&u256_be(offset_auth));
     out.extend_from_slice(&u256_be(offset_client));
     out.extend_from_slice(&u256_be(offset_sig));
 
-    // authenticatorData
+    // authenticatorData 인코딩
     out.extend_from_slice(&u256_be(auth_len as u64));
     out.extend_from_slice(authenticator_data);
     let pad = (32 - (auth_len % 32)) % 32;
@@ -180,7 +180,7 @@ pub fn encode_recover_owner(
         out.extend_from_slice(&vec![0u8; pad]);
     }
 
-    // clientDataJSON
+    // clientDataJSON 인코딩
     out.extend_from_slice(&u256_be(client_len as u64));
     out.extend_from_slice(client_data_json);
     let pad = (32 - (client_len % 32)) % 32;
@@ -188,7 +188,7 @@ pub fn encode_recover_owner(
         out.extend_from_slice(&vec![0u8; pad]);
     }
 
-    // signature
+    // signature 인코딩
     out.extend_from_slice(&u256_be(sig_len as u64));
     out.extend_from_slice(signature);
     let pad = (32 - (sig_len % 32)) % 32;

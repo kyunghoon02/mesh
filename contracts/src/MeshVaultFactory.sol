@@ -21,23 +21,12 @@ contract MeshVaultFactory {
 
     /// @notice 배포될 MeshVault 주소 계산
     function getAddress(address owner, bytes calldata passkeyPubkey, bytes32 salt) public view returns (address) {
-        bytes memory initCode = abi.encodePacked(
-            type(MeshVault).creationCode,
-            abi.encode(owner, passkeyPubkey)
-        );
+        bytes memory initCode = abi.encodePacked(type(MeshVault).creationCode, abi.encode(owner, passkeyPubkey));
         bytes32 hash = keccak256(initCode);
         return _computeCreate2Address(hash, salt);
     }
 
     function _computeCreate2Address(bytes32 initCodeHash, bytes32 salt) internal view returns (address) {
-        return address(
-            uint160(
-                uint256(
-                    keccak256(
-                        abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash)
-                    )
-                )
-            )
-        );
+        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash)))));
     }
 }

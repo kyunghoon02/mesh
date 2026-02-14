@@ -1,4 +1,5 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
+
 use common::{SecurePacket, SerialCommand, SerialFrame, SerialResponse};
 use postcard::{from_bytes, to_allocvec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,37 +29,53 @@ impl SerialClient {
     }
 
     pub async fn get_status(&self, sequence_id: u32) -> Result<u8, String> {
-        info!(sequence_id = sequence_id, "mesh_getStatus 요청");
+        info!(
+            sequence_id = sequence_id,
+            event = "serial.get_status.request",
+            "Node-B -> Node A 상태 조회 요청 시작"
+        );
+
         let frame = SerialFrame::new(SerialCommand::GetStatus, sequence_id, &[]).ok_or("frame build failed")?;
         let resp = self.send_frame(frame).await?;
 
         if resp.sequence_id != sequence_id {
-            return Err(format!(
-                "sequence mismatch: req={} resp={}",
-                sequence_id, resp.sequence_id
-            ));
+            warn!(
+                event = "serial.seq_mismatch",
+                request_seq = sequence_id,
+                response_seq = resp.sequence_id,
+                "요청/응답 시퀀스 불일치"
+            );
+            return Err(format!("sequence mismatch: req={} resp={}", sequence_id, resp.sequence_id));
         }
         if !resp.success {
+            warn!(
+                event = "serial.device_error",
+                sequence_id = sequence_id,
+                error_code = resp.error_code,
+                "기기 응답 실패"
+            );
             return Err(format!("device error: {}", resp.error_code));
         }
 
         let data = resp.payload_bytes();
         if data.is_empty() {
-            warn!("mesh_getStatus payload empty");
+            warn!(
+                event = "serial.empty_status",
+                sequence_id = sequence_id,
+                "상태 응답 페이로드가 비어 있음"
+            );
             return Err("empty status".to_string());
         }
+
         Ok(data[0])
     }
 
-    pub async fn send_sign_request(
-        &self,
-        sequence_id: u32,
-        packet: &SecurePacket,
-    ) -> Result<SerialResponse, String> {
+    pub async fn send_sign_request(&self, sequence_id: u32, packet: &SecurePacket) -> Result<SerialResponse, String> {
         info!(
             sequence_id = sequence_id,
             ciphertext_len = packet.ciphertext_len,
-            "eth_send/raw sign request 전송"
+            event = "serial.send_sign_request",
+            "서명 요청 전송 시작"
         );
 
         let payload = to_allocvec(packet).map_err(|e| e.to_string())?;
@@ -67,11 +84,15 @@ impl SerialClient {
         let resp = self.send_frame(frame).await?;
 
         if resp.sequence_id != sequence_id {
-            return Err(format!(
-                "sequence mismatch: req={} resp={}",
-                sequence_id, resp.sequence_id
-            ));
+            warn!(
+                event = "serial.seq_mismatch",
+                request_seq = sequence_id,
+                response_seq = resp.sequence_id,
+                "요청/응답 시퀀스 불일치"
+            );
+            return Err(format!("sequence mismatch: req={} resp={}", sequence_id, resp.sequence_id));
         }
+
         Ok(resp)
     }
 
@@ -81,46 +102,89 @@ impl SerialClient {
         let len = bytes.len() as u16;
 
         if let Err(e) = guard.write_all(&len.to_le_bytes()).await {
-            error!("serial length write failed: {}", e);
+            error!(
+                event = "serial.write_length_failed",
+                frame_len = bytes.len(),
+                "serial length write failed: {}",
+                e
+            );
             return Err(e.to_string());
         }
 
         if let Err(e) = guard.write_all(&bytes).await {
-            error!("serial payload write failed: {}", e);
+            error!(
+                event = "serial.write_payload_failed",
+                frame_len = bytes.len(),
+                "serial payload write failed: {}",
+                e
+            );
             return Err(e.to_string());
         }
 
         if let Err(e) = guard.flush().await {
-            error!("serial flush failed: {}", e);
+            error!(
+                event = "serial.flush_failed",
+                frame_len = bytes.len(),
+                "serial flush failed: {}",
+                e
+            );
             return Err(e.to_string());
         }
 
-        debug!(command = ?frame.command, payload_len = bytes.len(), "serial frame sent");
+        debug!(
+            event = "serial.frame_sent",
+            command = ?frame.command,
+            payload_len = bytes.len(),
+            sequence_id = frame.sequence_id,
+            "serial frame sent"
+        );
 
         let mut len_buf = [0u8; 2];
         if let Err(e) = guard.read_exact(&mut len_buf).await {
-            warn!("serial response length read failed: {}", e);
+            warn!(
+                event = "serial.read_response_length_failed",
+                sequence_id = frame.sequence_id,
+                "serial response length read failed: {}",
+                e
+            );
             return Err(e.to_string());
         }
 
         let resp_len = u16::from_le_bytes(len_buf) as usize;
         if resp_len == 0 || resp_len > 1024 {
-            warn!("invalid response length: {}", resp_len);
+            warn!(
+                event = "serial.invalid_response_length",
+                sequence_id = frame.sequence_id,
+                response_len = resp_len,
+                "invalid response length"
+            );
             return Err("invalid response length".into());
         }
 
         let mut resp_buf = vec![0u8; resp_len];
         if let Err(e) = guard.read_exact(&mut resp_buf).await {
-            warn!("serial response body read failed: {}", e);
+            warn!(
+                event = "serial.read_response_body_failed",
+                sequence_id = frame.sequence_id,
+                response_len = resp_len,
+                "serial response body read failed: {}",
+                e
+            );
             return Err(e.to_string());
         }
 
-        debug!(len = resp_len, "serial response received");
+        debug!(
+            event = "serial.response_received",
+            sequence_id = frame.sequence_id,
+            response_len = resp_len,
+            "serial response received"
+        );
 
         match from_bytes::<SerialResponse>(&resp_buf) {
             Ok(resp) => {
                 if !resp.success {
                     warn!(
+                        event = "serial.device_error_response",
                         error_code = resp.error_code,
                         sequence_id = resp.sequence_id,
                         "serial error response"
@@ -129,7 +193,12 @@ impl SerialClient {
                 Ok(resp)
             }
             Err(e) => {
-                error!("serial response decode failed: {}", e);
+                error!(
+                    event = "serial.decode_failed",
+                    sequence_id = frame.sequence_id,
+                    "serial response decode failed: {}",
+                    e
+                );
                 Err(e.to_string())
             }
         }
