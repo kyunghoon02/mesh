@@ -76,10 +76,15 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
 
     if method == "eth_accounts" || method == "eth_requestAccounts" {
         let addr = resolve_account(state).await;
+        let result = if addr.is_empty() {
+            json!([])
+        } else {
+            json!([addr])
+        };
         return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": [addr],
+            "result": result,
         }));
     }
 

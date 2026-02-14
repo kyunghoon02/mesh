@@ -114,3 +114,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_nodeb_relayer_
 ```
 
 실제 하드웨어(Node A, Node B)가 있어야 `mesh_getStatus` 및 하드웨어 경유 트랜잭션 플로우를 완전히 점검할 수 있습니다.
+
+## dApp 로그인 호환성 점검 (Core)
+
+Relayer가 dApp에 노출하는 계정이 SCA로 바뀌는지 확인하는 최소 체크리스트입니다.
+
+- `eth_accounts`를 호출했을 때 결과 배열이 SCA 주소를 반영하는지 확인
+- `eth_requestAccounts`에서 같은 주소가 반환되는지 확인
+- `mesh_getChainConfig`에서 `mode: SCA`, `status: active`, `sca_address`가 올바른지 확인
+- `wallet_reconnect` 또는 dApp 재접속 후에도 계정 값이 유지되는지 확인
+
+예시:
+
+```bash
+curl http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_accounts","params":[]}'
+
+curl http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"eth_requestAccounts","params":[]}'
+
+curl http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"mesh_getChainConfig","params":[{"chain_id":"0xaa36a7"}]}'
+```
+
+기대 응답:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":["0x...sca..."]}
+```
+
+실패 시 확인 포인트:
+
+- `result`가 빈 배열이면, `EOA_ADDRESS`, `SCA` 활성화/상태, `chain_id` 조회 과정을 점검
+- 값이 비어있는 경우 `resolve_account`가 `[]`를 반환하도록 변경되었기 때문에 빈 배열 자체는 런타임 안전 동작입니다.
