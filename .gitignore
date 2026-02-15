@@ -8,3 +8,5 @@ prd.md
 /relayer/.env
 mesh.pen
 scripts/
+/firmware/target/
+/contracts/test/
