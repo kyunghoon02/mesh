@@ -13,7 +13,6 @@ pub struct KeyManager {
 }
 
 impl KeyManager {
-    /// TRNG로 secp256k1 개인키를 생성한다.
     pub fn generate_new(rng: &mut Rng) -> Self {
         loop {
             let mut seed = [0u8; 32];
@@ -25,7 +24,6 @@ impl KeyManager {
         }
     }
 
-    /// 개인키에서 이더리움 주소를 계산한다.
     pub fn get_eth_address(&self) -> [u8; 20] {
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let public_key = self.secret_key.public_key();
@@ -41,16 +39,14 @@ impl KeyManager {
         address
     }
 
-    /// 메시지 해시를 서명하고, 이더리움 형식 v 값을 붙여 반환한다.
     pub fn sign_hash(&self, hash32: &[u8; 32]) -> Option<[u8; 65]> {
         let signing_key = SigningKey::from(&self.secret_key);
         let signature = signing_key.sign_prehash(hash32).ok()?;
 
-        // 검증으로 가장자리 케이스까지 복구 ID를 정확히 찾아 매핑한다.
         let verifying_key = VerifyingKey::from(&signing_key);
         let mut recovery_id = None;
         for id in 0u8..=1 {
-            if let Ok(rid) = RecoveryId::from_byte(id) {
+            if let Some(rid) = RecoveryId::from_byte(id) {
                 if let Ok(recovered) = VerifyingKey::recover_from_prehash(hash32, &signature, rid) {
                     if recovered == verifying_key {
                         recovery_id = Some(rid);
@@ -63,12 +59,10 @@ impl KeyManager {
 
         let mut out = [0u8; 65];
         out[..64].copy_from_slice(&signature.to_bytes());
-        // 이더리움 v 값은 27/28 규격을 사용한다.
         out[64] = recovery_id.to_byte() + 27;
         Some(out)
     }
 
-    /// 개인키에서 AEAD 키를 파생한다.
     pub fn derive_aead_key(secret_key: &SecretKey) -> [u8; 32] {
         let mut hasher = Keccak256::new();
         hasher.update(secret_key.to_bytes());
@@ -90,8 +84,6 @@ impl KeyManager {
     }
 }
 
-/// SecurePacket 페이로드를 ChaCha20-Poly1305로 복호화한다.
-/// auth_tag가 0으로 채워진 패킷은 유효하지 않은 요청으로 간주한다.
 pub fn decrypt_payload(
     boot_id: u32,
     counter: u64,
@@ -125,7 +117,6 @@ pub fn decrypt_payload(
     }
 }
 
-/// 서명해시를 암호화해 ESP-NOW 송신용 payload를 구성한다.
 pub fn encrypt_hash(
     boot_id: u32,
     counter: u64,
@@ -145,7 +136,6 @@ pub fn encrypt_hash(
     (buf, tag.into())
 }
 
-/// 범용 SecurePacket 페이로드를 암호화한다.
 pub fn encrypt_payload(
     boot_id: u32,
     counter: u64,
@@ -171,8 +161,7 @@ pub fn encrypt_payload(
 
 fn build_nonce(boot_id: u32, counter: u64) -> Nonce {
     let mut out = [0u8; 12];
-    // 빌드 시 사용하는 boot_id + counter 조합을 12byte nonce로 사용
     out[..4].copy_from_slice(&boot_id.to_be_bytes());
     out[4..].copy_from_slice(&counter.to_be_bytes());
-    Nonce::from_slice(&out).to_owned()
+    Nonce::clone_from_slice(&out)
 }

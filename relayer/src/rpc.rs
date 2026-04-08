@@ -24,7 +24,8 @@ use heapless::String as HString;
 use crate::AppState;
 use crate::abi::{
     address_to_hex, encode_create_account, encode_get_address, encode_recover_owner,
-    encode_set_passkey, parse_abi_address, parse_address, parse_bytes32, parse_hex_bytes, to_hex,
+    encode_recovery_nonce, encode_set_passkey, parse_abi_address, parse_address, parse_bytes32,
+    parse_hex_bytes, parse_u256_hex, to_hex,
 };
 use crate::db::{get_chain_config, get_passkey, upsert_chain_config, upsert_passkey};
 use crate::eth_rpc::{fetch_tx_receipt, parse_receipt_status};
@@ -88,6 +89,44 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
         }));
     }
 
+    if method == "eth_chainId" {
+        let chain_id = extract_chain_id(req)
+            .or(state.chain_id)
+            .or(resolve_chain_id(state).await);
+
+        return Some(match chain_id {
+            Some(chain_id) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": format!("0x{:x}", chain_id),
+            }),
+            None => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32000, "message": "chain id unavailable"}
+            }),
+        });
+    }
+
+    if method == "net_version" {
+        let chain_id = extract_chain_id(req)
+            .or(state.chain_id)
+            .or(resolve_chain_id(state).await);
+
+        return Some(match chain_id {
+            Some(chain_id) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": chain_id.to_string(),
+            }),
+            None => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32000, "message": "chain id unavailable"}
+            }),
+        });
+    }
+
     if method == "mesh_getStatus" {
         if let Some(serial) = &state.serial {
             let seq = state.seq.fetch_add(1, Ordering::Relaxed);
@@ -134,6 +173,10 @@ async fn handle_single(req: &Value, state: &AppState) -> Option<Value> {
 
     if method == "mesh_prepareRecover" {
         return Some(handle_prepare_recover(req, state).await);
+    }
+
+    if method == "mesh_getRecoveryChallenge" {
+        return Some(handle_get_recovery_challenge(req, state).await);
     }
 
     if method == "mesh_setPasskey" {
@@ -330,7 +373,7 @@ async fn handle_prepare_deploy(req: &Value, state: &AppState) -> Value {
         }
     };
 
-    if let (Some(db), Some(chain_id)) = (&state.db, state.chain_id) {
+    if let Some(db) = &state.db {
         let _ = upsert_chain_config(
             db,
             chain_id,
@@ -662,6 +705,164 @@ async fn handle_prepare_set_passkey(req: &Value, state: &AppState) -> Value {
                 "jsonrpc": "2.0",
                 "id": 1
             }
+        }
+    })
+}
+
+async fn handle_get_recovery_challenge(req: &Value, state: &AppState) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = req.get("params").and_then(|p| p.as_array());
+    let first = params.and_then(|p| p.get(0)).and_then(|v| v.as_object());
+
+    let chain_id = first
+        .and_then(|m| m.get("chain_id"))
+        .and_then(parse_chain_id_value)
+        .or(state.chain_id);
+    let chain_id = match chain_id {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "missing chain_id"}
+            });
+        }
+    };
+
+    let owner = first
+        .and_then(|m| m.get("owner"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+    let new_owner = first
+        .and_then(|m| m.get("new_owner").or_else(|| m.get("newOwner")))
+        .and_then(|v| v.as_str())
+        .and_then(parse_address);
+
+    let owner = match owner {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid owner"}
+            });
+        }
+    };
+    let new_owner = match new_owner {
+        Some(v) => v,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "invalid new_owner"}
+            });
+        }
+    };
+
+    let db = match &state.db {
+        Some(db) => db,
+        None => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": "DATABASE_URL not configured"}
+            });
+        }
+    };
+
+    let cfg = match get_chain_config(db, chain_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32021, "message": "chain config not found"}
+            });
+        }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    };
+
+    let supports_passkey = cfg
+        .get("supports_passkey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !supports_passkey {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "passkey not supported on this chain"}
+        });
+    }
+    if cfg.get("status").and_then(|v| v.as_str()) != Some("active") {
+        return json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "error": {"code": -32602, "message": "wallet is not active"}
+        });
+    }
+
+    match get_passkey(db, &address_to_hex(owner), chain_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32021, "message": "passkey is not registered"}
+            });
+        }
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32020, "message": e}
+            });
+        }
+    }
+
+    let sca_address = match cfg.get("sca_address").and_then(|v| v.as_str()) {
+        Some(v) if parse_address(v).is_some() => v.to_string(),
+        _ => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "sca_address is not configured"}
+            });
+        }
+    };
+
+    let upstream = resolve_upstream(state, req).await;
+    let recovery_nonce = match fetch_recovery_nonce(state, &upstream, &sca_address).await {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "error": {"code": -32030, "message": e}
+            });
+        }
+    };
+
+    let challenge = build_recovery_challenge_bytes(
+        parse_address(&sca_address).expect("validated sca address"),
+        chain_id,
+        new_owner,
+        recovery_nonce,
+    );
+
+    json!({
+        "jsonrpc":"2.0",
+        "id": id,
+        "result": {
+            "chain_id": chain_id,
+            "sca_address": sca_address,
+            "recovery_nonce": to_hex(&recovery_nonce),
+            "challenge": to_hex(&challenge),
         }
     })
 }
@@ -1891,6 +2092,66 @@ async fn fetch_predicted_address(
     Some(address_to_hex(addr))
 }
 
+async fn fetch_recovery_nonce(
+    state: &AppState,
+    upstream: &str,
+    sca_address: &str,
+) -> Result<[u8; 32], String> {
+    if upstream.is_empty() {
+        return Err("UPSTREAM_RPC not configured".to_string());
+    }
+
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{
+            "to": sca_address,
+            "data": to_hex(&encode_recovery_nonce())
+        }, "latest"]
+    });
+
+    let resp = state
+        .client
+        .post(upstream)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let value: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let raw = value
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing recoveryNonce result".to_string())?;
+
+    parse_u256_hex(raw).ok_or_else(|| "invalid recoveryNonce result".to_string())
+}
+
+fn build_recovery_challenge_bytes(
+    sca_address: [u8; 20],
+    chain_id: u64,
+    new_owner: [u8; 20],
+    recovery_nonce: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(b"MESH_RECOVER");
+    hasher.update(sca_address);
+    hasher.update(u256_be_from_u64(chain_id));
+    hasher.update(new_owner);
+    hasher.update(recovery_nonce);
+
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
+fn u256_be_from_u64(value: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
 async fn resolve_upstream(state: &AppState, req: &Value) -> String {
     if let (Some(db), Some(chain_id)) = (&state.db, extract_chain_id(req).or(state.chain_id)) {
         if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
@@ -1929,4 +2190,20 @@ async fn resolve_account(state: &AppState) -> String {
         return state.sca_address.clone();
     }
     String::new()
+}
+
+async fn resolve_chain_id(state: &AppState) -> Option<u64> {
+    if let (Some(db), Some(chain_id)) = (&state.db, state.chain_id) {
+        if let Ok(Some(cfg)) = get_chain_config(db, chain_id).await {
+            if let Some(found) = cfg.get("chain_id").and_then(parse_chain_id_value) {
+                return Some(found);
+            }
+        }
+    }
+
+    if let Some(chain_id) = state.chain_id {
+        return Some(chain_id);
+    }
+
+    None
 }

@@ -7,6 +7,14 @@ prd.md
 /contracts/broadcast
 /relayer/.env
 mesh.pen
-scripts/
+/scripts/*
+!/scripts/nodeb_test.ps1
+!/scripts/start-relayer.ps1
 /firmware/target/
 /contracts/test/
+/.nodea_wallet.txt
+/relayer-run.log
+/relayer-run.err
+/relayer-ethsign.out
+/relayer-ethsign.err
+/firmware/rustc-ice-*.txt

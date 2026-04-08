@@ -98,6 +98,13 @@ export type PrepareRecoverResult = {
   };
 };
 
+export type RecoveryChallengeResult = {
+  chain_id: number;
+  sca_address: string;
+  recovery_nonce: string;
+  challenge: string;
+};
+
 export type ConfirmDeployResult = {
   chain_id: number;
   status: "active" | "failed" | "pending";

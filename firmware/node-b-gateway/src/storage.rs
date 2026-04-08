@@ -1,4 +1,4 @@
-use embedded_storage::{ReadStorage, Storage};
+use embedded_storage::{ReadStorage, Storage, nor_flash::NorFlash};
 use esp_partition_table::PartitionTable;
 use esp_storage::FlashStorage;
 
@@ -15,29 +15,22 @@ impl PairingStorage {
     /// flash 파티션을 탐색해 mesh_pairing 또는 mesh_key 슬롯 영역을 찾는다.
     pub fn new() -> Self {
         let mut flash = FlashStorage::new();
-        let mut table_bin = [0u8; 3072];
-
-        if flash.read(0x8000, &mut table_bin).is_err() {
-            return Self {
-                flash: None,
-                partition_offset: 0,
-                partition_size: 0,
-            };
-        }
-
+        let table = PartitionTable::default();
         let mut found = None;
-        for part in PartitionTable::iter(&table_bin).filter_map(|p| p.ok()) {
-            if part.name() == "mesh_pairing" || part.name() == "mesh_key" {
-                found = Some(part);
-                break;
+        for part in table.iter_storage(&mut flash, false) {
+            if let Ok(part) = part {
+                if part.name() == "mesh_pairing" || part.name() == "mesh_key" {
+                    found = Some(part);
+                    break;
+                }
             }
         }
 
         match found {
             Some(part) => Self {
                 flash: Some(flash),
-                partition_offset: part.offset(),
-                partition_size: part.size(),
+                partition_offset: part.offset,
+                partition_size: part.size as u32,
             },
             None => Self {
                 flash: None,
@@ -139,11 +132,7 @@ impl PairingStorage {
         buf[5..11].copy_from_slice(mac);
 
         let write_offset = base + (write_index as u32 * SLOT_SIZE as u32);
-        self.flash
-            .as_mut()
-            .ok_or(())?
-            .write(write_offset, &buf)
-            .map_err(|_| ())
+        Storage::write(self.flash.as_mut().ok_or(())?, write_offset, &buf).map_err(|_| ())
     }
 
     fn is_available(&self) -> bool {

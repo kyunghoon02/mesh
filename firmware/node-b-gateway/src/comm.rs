@@ -1,6 +1,16 @@
-﻿use common::SecurePacket;
-use esp_wifi::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
+use common::SecurePacket;
+use esp_wifi::esp_now::{Error as EspNowInnerError, EspNow, EspNowError, EspNowWifiInterface, PeerInfo};
 use postcard::{from_bytes, to_slice};
+
+pub const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
+const ESPNOW_CHANNEL: u8 = 1;
+
+#[derive(Debug)]
+pub enum SendPacketError {
+    Serialize,
+    Send(EspNowError),
+    Wait(EspNowError),
+}
 
 pub struct CommManager<'a> {
     esp_now: EspNow<'a>,
@@ -8,21 +18,8 @@ pub struct CommManager<'a> {
 }
 
 impl<'a> CommManager<'a> {
-    pub fn new(mut esp_now: EspNow<'a>, node_a_mac: [u8; 6]) -> Self {
-        match esp_now.add_peer(PeerInfo {
-            interface: EspNowWifiInterface::Sta,
-            peer_address: node_a_mac,
-            lmk: None,
-            channel: None,
-            encrypt: false,
-        }) {
-            Ok(_) => {
-                esp_println::println!("[espnow][event=peer_added] node_a_mac={:?}", node_a_mac);
-            }
-            Err(_) => {
-                esp_println::println!("[espnow][event=peer_add_failed] node_a_mac={:?}", node_a_mac);
-            }
-        }
+    pub fn new(esp_now: EspNow<'a>, node_a_mac: [u8; 6]) -> Self {
+        let _ = Self::ensure_peer_registered(&esp_now, node_a_mac);
 
         Self {
             esp_now,
@@ -32,75 +29,87 @@ impl<'a> CommManager<'a> {
 
     pub fn receive_packet(&mut self) -> Option<SecurePacket> {
         if let Some(data) = self.esp_now.receive() {
-            let src = data.info.src_addr;
-            let len = data.len as usize;
+            let raw_data = data.data();
 
-            if len == 0 {
-                esp_println::println!("[espnow][event=rx_empty]");
+            if raw_data.is_empty() {
                 return None;
             }
 
-            if len > data.data.len() {
-                esp_println::println!(
-                    "[espnow][event=rx_invalid_length] len={} buffer_len={}",
-                    len,
-                    data.data.len()
-                );
-                return None;
-            }
-
-            if src != self.peer_address {
-                esp_println::println!(
-                    "[espnow][event=rx_unmatched_peer] src={:?} allow={:?}",
-                    src,
-                    self.peer_address
-                );
-                return None;
-            }
-
-            let raw_data = &data.data[..len];
-            match from_bytes::<SecurePacket>(raw_data) {
-                Ok(packet) => Some(packet),
-                Err(_) => {
-                    esp_println::println!(
-                        "[espnow][event=rx_deserialize_fail] len={} src={:?}",
-                        len,
-                        src
-                    );
-                    None
-                }
-            }
+            from_bytes::<SecurePacket>(raw_data).ok()
         } else {
             None
         }
     }
 
-    pub fn send_packet(&mut self, packet: &SecurePacket) -> Result<(), ()> {
+    pub fn send_packet(&mut self, packet: &SecurePacket) -> Result<(), SendPacketError> {
+        self.send_packet_to(self.peer_address, packet)
+    }
+
+    pub fn send_packet_to(
+        &mut self,
+        destination: [u8; 6],
+        packet: &SecurePacket,
+    ) -> Result<(), SendPacketError> {
         let mut buf = [0u8; 250];
-        let serialized = match to_slice(packet, &mut buf) {
-            Ok(v) => v,
-            Err(_) => {
-                esp_println::println!("[espnow][event=tx_serialize_failed]");
-                return Err(());
-            }
-        };
+        let serialized = to_slice(packet, &mut buf).map_err(|_| SendPacketError::Serialize)?;
 
-        let token = match self.esp_now.send(&self.peer_address, serialized) {
-            Ok(t) => t,
-            Err(_) => {
-                esp_println::println!(
-                    "[espnow][event=tx_send_failed] to={:?}",
-                    self.peer_address
-                );
-                return Err(());
-            }
-        };
+        let _ = Self::ensure_peer_registered(&self.esp_now, destination);
 
-        if let Err(_) = token.wait() {
-            esp_println::println!("[espnow][event=tx_wait_timeout] to={:?}", self.peer_address);
-            return Err(());
+        let token = self
+            .esp_now
+            .send(&destination, serialized)
+            .map_err(SendPacketError::Send)?;
+
+        if destination == BROADCAST_MAC {
+            return Ok(());
         }
 
-        Ok(())
+        token.wait().map_err(SendPacketError::Wait)
+    }
+
+    fn ensure_peer_registered(esp_now: &EspNow<'a>, peer_address: [u8; 6]) -> Result<(), ()> {
+        esp_now
+            .add_peer(PeerInfo {
+                interface: EspNowWifiInterface::Sta,
+                peer_address,
+                lmk: None,
+                channel: Some(ESPNOW_CHANNEL),
+                encrypt: false,
+            })
+            .map_err(|_| ())
+    }
+}
+
+pub fn send_error_label(err: SendPacketError) -> &'static [u8] {
+    match err {
+        SendPacketError::Serialize => b"PAIRING_SEND_ERR_SERIALIZE",
+        SendPacketError::Send(EspNowError::SendFailed) => b"PAIRING_SEND_ERR_SEND_FAILED",
+        SendPacketError::Wait(EspNowError::SendFailed) => b"PAIRING_SEND_ERR_WAIT_FAILED",
+        SendPacketError::Send(EspNowError::Error(inner)) => match inner {
+            EspNowInnerError::NotInitialized => b"PAIRING_SEND_ERR_NOT_INITIALIZED",
+            EspNowInnerError::InvalidArgument => b"PAIRING_SEND_ERR_INVALID_ARGUMENT",
+            EspNowInnerError::OutOfMemory => b"PAIRING_SEND_ERR_OUT_OF_MEMORY",
+            EspNowInnerError::PeerListFull => b"PAIRING_SEND_ERR_PEER_LIST_FULL",
+            EspNowInnerError::NotFound => b"PAIRING_SEND_ERR_NOT_FOUND",
+            EspNowInnerError::InternalError => b"PAIRING_SEND_ERR_INTERNAL_ERROR",
+            EspNowInnerError::PeerExists => b"PAIRING_SEND_ERR_PEER_EXISTS",
+            EspNowInnerError::InterfaceError => b"PAIRING_SEND_ERR_INTERFACE_ERROR",
+            EspNowInnerError::Other(_) => b"PAIRING_SEND_ERR_OTHER",
+        },
+        SendPacketError::Wait(EspNowError::Error(inner)) => match inner {
+            EspNowInnerError::NotInitialized => b"PAIRING_WAIT_ERR_NOT_INITIALIZED",
+            EspNowInnerError::InvalidArgument => b"PAIRING_WAIT_ERR_INVALID_ARGUMENT",
+            EspNowInnerError::OutOfMemory => b"PAIRING_WAIT_ERR_OUT_OF_MEMORY",
+            EspNowInnerError::PeerListFull => b"PAIRING_WAIT_ERR_PEER_LIST_FULL",
+            EspNowInnerError::NotFound => b"PAIRING_WAIT_ERR_NOT_FOUND",
+            EspNowInnerError::InternalError => b"PAIRING_WAIT_ERR_INTERNAL_ERROR",
+            EspNowInnerError::PeerExists => b"PAIRING_WAIT_ERR_PEER_EXISTS",
+            EspNowInnerError::InterfaceError => b"PAIRING_WAIT_ERR_INTERFACE_ERROR",
+            EspNowInnerError::Other(_) => b"PAIRING_WAIT_ERR_OTHER",
+        },
+        SendPacketError::Send(EspNowError::DuplicateInstance)
+        | SendPacketError::Wait(EspNowError::DuplicateInstance) => b"PAIRING_ERR_DUPLICATE_INSTANCE",
+        SendPacketError::Send(EspNowError::Initialization(_))
+        | SendPacketError::Wait(EspNowError::Initialization(_)) => b"PAIRING_ERR_WIFI_INIT",
     }
 }

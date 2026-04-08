@@ -6,9 +6,10 @@ import {
   type PasskeyRecord,
   type PrepareDeployResult,
   type PrepareRecoverResult,
+  type RecoveryChallengeResult,
   type SetPasskeyResult
 } from "./rpc";
-import { makeRecoveryChallenge, registerPasskey, signWithPasskey } from "./webauthn";
+import { fromHex, registerPasskey, signWithPasskey } from "./webauthn";
 
 type ViewState = "idle" | "pending" | "active" | "confirm" | "error";
 type SidebarTab = "dashboard" | "settings";
@@ -523,17 +524,19 @@ function App() {
       return;
     }
 
-    const challenge = makeRecoveryChallenge({
-      owner: effectiveOwner,
-      newOwner,
-      chainId
-    });
-
     setLoading(true);
     appendLog("mesh_prepareRecover request");
     try {
+      const recoveryContext = await callRpc<RecoveryChallengeResult>("mesh_getRecoveryChallenge", [
+        {
+          owner: effectiveOwner,
+          chain_id: chainHex,
+          new_owner: newOwner
+        }
+      ]);
+
       const assertion = await signWithPasskey({
-        challenge,
+        challenge: fromHex(recoveryContext.challenge),
         rpId: record.rp_id || (import.meta.env.VITE_RP_ID as string | undefined),
         credentialId: record.credential_id || undefined,
         userVerification: "required"

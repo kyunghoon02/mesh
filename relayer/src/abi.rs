@@ -199,6 +199,16 @@ pub fn encode_recover_owner(
     out
 }
 
+pub fn encode_recovery_nonce() -> Vec<u8> {
+    let mut hasher = Keccak256::new();
+    hasher.update(b"recoveryNonce()");
+    hasher.finalize()[..4].to_vec()
+}
+
+pub fn parse_u256_hex(s: &str) -> Option<[u8; 32]> {
+    parse_bytes32(s)
+}
+
 fn u256_be(value: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[24..].copy_from_slice(&value.to_be_bytes());

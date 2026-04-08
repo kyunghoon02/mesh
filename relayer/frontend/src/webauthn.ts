@@ -21,6 +21,24 @@ function fromBase64Url(base64url: string): Uint8Array {
   return bytes;
 }
 
+export function fromHex(hex: string): Uint8Array {
+  const normalized = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (normalized.length === 0 || normalized.length % 2 !== 0) {
+    throw new Error("Invalid hex string");
+  }
+
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let i = 0; i < normalized.length; i += 2) {
+    const pair = normalized.slice(i, i + 2);
+    if (!/^[0-9a-fA-F]{2}$/.test(pair)) {
+      throw new Error("Invalid hex string");
+    }
+    const value = Number.parseInt(pair, 16);
+    bytes[i / 2] = value;
+  }
+  return bytes;
+}
+
 function toUint8(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -195,9 +213,4 @@ export async function signWithPasskey(options: {
     signatureHex: toHex(signature),
     credentialId: toBase64Url(new Uint8Array(assertion.rawId))
   };
-}
-
-export function makeRecoveryChallenge(args: { owner: string; newOwner: string; chainId: number }): Uint8Array {
-  const message = `mesh-recover:${args.chainId}:${args.owner.toLowerCase()}:${args.newOwner.toLowerCase()}`;
-  return new TextEncoder().encode(message);
 }

@@ -5,16 +5,18 @@ edition = "2024"
 
 [dependencies]
 esp-hal = { version = "=1.0.0-rc.0", features = ["esp32c3", "unstable"] }
+esp-alloc = "0.8.0"
 embedded-storage = "0.3.1"
 esp-partition-table = "0.1.0"
-esp-storage = { version = "0.7.0" }
+esp-storage = { version = "0.7.0", features = ["esp32c3"] }
 esp-wifi = { version = "0.15.1", features = ["esp32c3", "wifi", "esp-now"] }
+esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32c3"] }
 esp-backtrace = { version = "0.18.1", features = [
     "esp32c3",
     "panic-handler",
     "println",
 ], default-features = false }
-esp-println = { version = "0.16.1", features = ["esp32c3"] }
-embedded-io = "0.7.1"
+esp-println = { version = "0.16.1", default-features = false, features = ["esp32c3", "no-op"] }
+embedded-io = "0.6.1"
 postcard = { version = "1.0", default-features = false }
 common = { path = "../../common" }

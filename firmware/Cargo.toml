@@ -4,3 +4,6 @@ members = [
     "node-b-gateway",
 ]
 resolver = "2"
+
+[patch.crates-io]
+esp-rom-sys = { path = "vendor/esp-rom-sys" }

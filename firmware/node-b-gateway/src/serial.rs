@@ -1,9 +1,10 @@
-use embedded_io::{ErrorKind, Read, Write};
+use embedded_io::Write;
+use esp_hal::{Blocking, usb_serial_jtag::UsbSerialJtag};
 
-// UART/Serial 수신/송신을 처리하는 단순 버퍼 기반 매니저
-// 프레임 형식: [len_lo, len_hi, payload]
-pub struct SerialManager<U> {
-    uart: U,
+// USB Serial/JTAG framed transport:
+// [len_lo, len_hi, postcard payload...]
+pub struct SerialManager<'d> {
+    usb: UsbSerialJtag<'d, Blocking>,
     len_buf: [u8; 2],
     len_read: usize,
     payload_len: Option<usize>,
@@ -17,13 +18,10 @@ pub enum SerialError {
     Empty = 3,
 }
 
-impl<U> SerialManager<U>
-where
-    U: Read + Write,
-{
-    pub fn new(uart: U) -> Self {
+impl<'d> SerialManager<'d> {
+    pub fn new(usb: UsbSerialJtag<'d, Blocking>) -> Self {
         Self {
-            uart,
+            usb,
             len_buf: [0u8; 2],
             len_read: 0,
             payload_len: None,
@@ -31,15 +29,10 @@ where
         }
     }
 
-    /// 1바이트씩 읽되 프레임이 완성될 때까지 버퍼링한다.
-    /// - 정상 수신: Ok(Some(len)) 반환
-    /// - 입력 부족: Ok(None)
-    /// - 기타 IO/길이 오류: Err
+    /// Buffer bytes until a complete framed payload is available.
     pub fn poll_read_frame(&mut self, buf: &mut [u8]) -> Result<Option<usize>, SerialError> {
         if self.payload_len.is_none() {
-            // 길이 헤더(2바이트) 읽기
-            let n = self.read_nonblocking(&mut self.len_buf[self.len_read..])?;
-            self.len_read += n;
+            self.len_read += Self::read_nonblocking(&mut self.usb, &mut self.len_buf[self.len_read..])?;
             if self.len_read < 2 {
                 return Ok(None);
             }
@@ -59,8 +52,7 @@ where
         }
 
         if let Some(len) = self.payload_len {
-            let n = self.read_nonblocking(&mut buf[self.payload_read..len])?;
-            self.payload_read += n;
+            self.payload_read += Self::read_nonblocking(&mut self.usb, &mut buf[self.payload_read..len])?;
             if self.payload_read < len {
                 return Ok(None);
             }
@@ -78,34 +70,39 @@ where
         }
 
         let len = payload.len() as u16;
-        let len_bytes = len.to_le_bytes();
-        self.write_all(&len_bytes)?;
+        self.write_all(&len.to_le_bytes())?;
         self.write_all(payload)?;
         Ok(())
     }
 
-    fn read_nonblocking(&mut self, buf: &mut [u8]) -> Result<usize, SerialError> {
-        match self.uart.read(buf) {
-            Ok(n) => Ok(n),
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock {
-                    Ok(0)
-                } else {
-                    Err(SerialError::Io)
+    fn read_nonblocking(
+        usb: &mut UsbSerialJtag<'d, Blocking>,
+        buf: &mut [u8],
+    ) -> Result<usize, SerialError> {
+        let mut count = 0;
+        while count < buf.len() {
+            match usb.read_byte() {
+                Ok(byte) => {
+                    buf[count] = byte;
+                    count += 1;
                 }
+                Err(_) => break,
             }
         }
+
+        Ok(count)
     }
 
     fn write_all(&mut self, mut buf: &[u8]) -> Result<(), SerialError> {
         while !buf.is_empty() {
-            match self.uart.write(buf) {
+            match embedded_io::Write::write(&mut self.usb, buf) {
                 Ok(0) => return Err(SerialError::Io),
                 Ok(n) => buf = &buf[n..],
                 Err(_) => return Err(SerialError::Io),
             }
         }
-        Ok(())
+
+        self.usb.flush().map_err(|_| SerialError::Io)
     }
 
     fn reset_rx(&mut self) {

@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client as PgClient;
 use tracing::{info, warn};
 
@@ -91,6 +92,21 @@ fn derive_aead_key_from_eoa() -> [u8; 32] {
     key
 }
 
+fn initial_sequence_seed() -> u32 {
+    (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        & 0xffff_ffff) as u32
+}
+
+fn initial_counter_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -156,8 +172,8 @@ async fn main() {
         db,
         chain_id,
         serial,
-        seq: Arc::new(AtomicU32::new(1)),
-        counter: Arc::new(AtomicU64::new(1)),
+        seq: Arc::new(AtomicU32::new(initial_sequence_seed())),
+        counter: Arc::new(AtomicU64::new(initial_counter_seed())),
         aead_key,
         client,
     });
